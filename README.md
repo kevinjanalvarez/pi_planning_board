@@ -1,22 +1,61 @@
-# Program Planning Board
+# PI Planning Board
 
-Program planning board with:
-- Frontend: npm + React (Vite)
-- Backend: Python + FastAPI + Uvicorn
-- Persistence: SQLite (`board.db`)
-- Integration: On-prem JIRA (IDEA project milestones)
+**PI Planning Board** is an internal web tool designed and built from scratch to digitize and streamline Program Increment (PI) planning ceremonies for agile delivery teams. It replaces static spreadsheets and physical sticky-note boards with an interactive planning surface that integrates directly with JIRA and Azure DevOps (ADO).
 
-## Features
-- 4-month planning window that always starts from current month.
-- 4 weeks per month (`WK1` to `WK4`) for a fixed 16-slot board.
-- Milestone row (`row 0`) is reserved for JIRA IDEA milestones.
-- Left-click any Milestone cell to create milestone input popup.
-- Milestone creation requires existing IDEA issue key and target date.
-- Add Task supports creating a new JIRA ticket (select JIRA project key) or a new ADO ticket (fixed type: User Story) when Source is set to New.
-- JIRA summary is fetched and shown in the ticket box on board.
-- SQLite stores board position data and transaction history.
+---
 
-## Backend Setup
+## The Problem
+
+PI planning sessions are a cornerstone of the Scaled Agile Framework (SAFe), but managing them in practice often means wrestling with bloated Excel files, disconnected JIRA exports, or expensive third-party tools. Teams needed a purpose-built solution that:
+
+- Reflects a live planning window with week-level granularity
+- Pulls ticket data directly from JIRA and ADO — no copy-pasting
+- Lets teams drag, assign, and link work items visually on a shared board
+- Keeps a full audit trail of every planning decision
+
+---
+
+## Tech Stack
+
+- **Frontend:** React 18 + Vite · Custom CSS
+- **Backend:** Python 3.11 · FastAPI · Uvicorn · SQLite
+- **Integrations:** On-prem JIRA REST API · Azure DevOps REST API
+
+---
+
+## Key Features
+
+| Feature | Description |
+|---|---|
+| **Multi-board management** | Create, edit, archive, clone, and delete named PI boards with configurable date ranges |
+| **Dynamic planning columns** | Auto-generates monthly columns (WK1–WK4) from a configurable start/end date |
+| **Milestone row** | Dedicated row reserved for JIRA IDEA-type milestones linked to real JIRA issue keys |
+| **JIRA integration** | Fetch issue metadata and create new JIRA tickets directly from the board |
+| **ADO integration** | Create and fetch Azure DevOps User Story work items from the board |
+| **Team rows** | Up to 10 configurable team rows with drag-to-reposition and multi-slot span support |
+| **Dependency linking** | Draw `blocks`, `depends_on`, and `relates_to` links between work items across teams |
+| **Activity log** | Append-only transaction history capturing every `CREATE` and `MOVE` event |
+
+---
+
+## Architecture
+
+```
+Browser (React SPA)
+       │  REST (JSON)
+       ▼
+FastAPI Backend  ──── JIRA REST API (on-prem)
+       │         └─── Azure DevOps REST API
+       ▼
+    SQLite
+  board_items | board_transactions | links | team_assignments | activity_log
+```
+
+---
+
+## Developer Setup
+
+### Backend Setup
 
 1. Go to backend folder:
 
@@ -55,7 +94,7 @@ copy .env.example .env
 uvicorn app.main:app --reload --port 8000
 ```
 
-## Frontend Setup
+### Frontend Setup
 
 1. Go to frontend folder:
 
@@ -72,14 +111,14 @@ npm run dev
 
 Frontend URL: `http://localhost:5173`
 
-## API Endpoints
+### API Endpoints
 - `GET /api/board` -> board shape, rows, and items.
 - `POST /api/milestones` -> create IDEA milestone from JIRA key and target date.
 - `GET /api/jira/projects` -> list available JIRA project keys for new task creation.
 - `PATCH /api/items/{item_id}/move` -> move existing non-milestone items.
 - `GET /health` -> health check.
 
-## Data Model
+### Data Model
 
 ### `board_items`
 - stores each board card location and metadata (`row_index`, `start_slot`, `end_slot`, `target_date`, etc.)
@@ -87,7 +126,7 @@ Frontend URL: `http://localhost:5173`
 ### `board_transactions`
 - append-only change log (`CREATE`, `MOVE`) with old/new JSON state
 
-## JIRA Notes
+### JIRA Notes
 - Backend uses JIRA REST endpoint:
   - `/rest/api/2/issue/{issueKey}?fields=summary,issuetype`
 - Only `issuetype = IDEA` is allowed for Milestone row.
