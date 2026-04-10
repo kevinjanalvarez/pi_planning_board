@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 
-const API_BASE = "http://0.0.0.0:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://0.0.0.0:8000";
 
 const PREVIEW_COLORS = [
   ["#10b981", "#ec4899", "#8b5cf6"],

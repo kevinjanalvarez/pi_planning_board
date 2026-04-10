@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Dashboard from "./Dashboard";
 
-const API_BASE = "http://0.0.0.0:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://0.0.0.0:8000";
 const TECH_TEAMS = [
   { code: "DWH", name: "DWH Scrum Team" },
   { code: "OPT2", name: "Operations Stream Board" },

@@ -18,7 +18,7 @@ PI planning sessions are a cornerstone of the Scaled Agile Framework (SAFe), but
 ## Tech Stack
 
 - **Frontend:** React 18 + Vite · Custom CSS
-- **Backend:** Python 3.11 · FastAPI · Uvicorn · SQLite
+- **Backend:** Python 3.13 · FastAPI · Uvicorn · SQLite
 - **Integrations:** On-prem JIRA REST API · Azure DevOps REST API
 
 ---
@@ -103,13 +103,67 @@ cd frontend
 npm install
 ```
 
-2. Run frontend dev server:
+2. (Optional) Set backend URL — create `frontend/.env`:
+
+```
+VITE_API_BASE=http://localhost:8000
+```
+
+Defaults to `http://0.0.0.0:8000` if not set.
+
+3. Run frontend dev server:
 
 ```powershell
 npm run dev
 ```
 
 Frontend URL: `http://localhost:5173`
+
+---
+
+## Server Deployment (Linux)
+
+Deployed on `automation-npvx00321.ph.infra` using ports in the **9000 range**.
+
+| Service | Port | URL |
+|---|---|---|
+| Backend (FastAPI) | 9000 | `http://automation-npvx00321.ph.infra:9000` |
+| Frontend (Vite) | 9001 | `http://automation-npvx00321.ph.infra:9001` |
+
+### Prerequisites (one-time)
+
+- Python 3.13 via Miniconda: `~/miniconda3/bin/python`
+- Node.js v24 via NVM
+
+### Start
+
+**Backend:**
+```bash
+cd ~/HCPH_PI_BOARD/backend
+nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 9000 > ~/hcph_backend.log 2>&1 &
+```
+
+**Frontend:**
+```bash
+export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh"
+cd ~/HCPH_PI_BOARD/frontend
+nohup npm run dev -- --host 0.0.0.0 --port 9001 > ~/hcph_frontend.log 2>&1 &
+```
+
+### Stop
+
+```bash
+pkill -f "uvicorn app.main"
+pkill -f "vite"
+```
+
+### Check status
+
+```bash
+ss -tlnp | grep -E '9000|9001'
+cat ~/hcph_backend.log
+cat ~/hcph_frontend.log
+```
 
 ### API Endpoints
 - `GET /api/board` -> board shape, rows, and items.
