@@ -15,8 +15,10 @@ def _dict_factory(cursor: sqlite3.Cursor, row: tuple[Any, ...]) -> dict[str, Any
 
 @contextmanager
 def get_conn() -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = _dict_factory
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
         conn.commit()
@@ -44,7 +46,8 @@ def init_db() -> None:
                 end_date TEXT,
                 color TEXT DEFAULT '#1f6688',
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                UNIQUE(board_id, issue_key, row_index)
             )
             """
         )
@@ -147,6 +150,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE boards ADD COLUMN start_date TEXT")
         if "end_date" not in board_cols:
             conn.execute("ALTER TABLE boards ADD COLUMN end_date TEXT")
+        if "created_by" not in board_cols:
+            conn.execute("ALTER TABLE boards ADD COLUMN created_by INTEGER")
 
         # Recreate row_team_assignments with composite PK (board_id, row_index)
         rta_cols = {r["name"] for r in conn.execute("PRAGMA table_info(row_team_assignments)").fetchall()}
@@ -182,6 +187,160 @@ def init_db() -> None:
             )
             """
         )
+
+        # ── Users / Auth ──
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+        # ── board_type migration ──
+        if "board_type" not in board_cols:
+            conn.execute("ALTER TABLE boards ADD COLUMN board_type TEXT NOT NULL DEFAULT 'pi_planning'")
+
+        # ── Kanban tables ──
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kanban_columns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                board_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                color TEXT DEFAULT '#3b82f6',
+                position INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (board_id) REFERENCES boards(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kanban_rows (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                board_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                color TEXT DEFAULT '#6b7280',
+                position INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (board_id) REFERENCES boards(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kanban_cards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                board_id INTEGER NOT NULL,
+                column_id INTEGER NOT NULL,
+                row_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                issue_key TEXT,
+                ticket_source TEXT,
+                description TEXT,
+                color TEXT DEFAULT '#1f6688',
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (board_id) REFERENCES boards(id),
+                FOREIGN KEY (column_id) REFERENCES kanban_columns(id),
+                FOREIGN KEY (row_id) REFERENCES kanban_rows(id)
+            )
+            """
+        )
+
+
+# ── User / Auth helpers ─────────────────────────────────────────────────
+
+def create_user(username: str, display_name: str, password_hash: str, role: str = "user") -> dict[str, Any]:
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO users (username, display_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
+            (username, display_name, password_hash, role, now),
+        )
+        return {
+            "id": cur.lastrowid,
+            "username": username,
+            "display_name": display_name,
+            "role": role,
+            "created_at": now,
+        }
+
+
+def fetch_user_by_username(username: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+
+
+def fetch_user_by_id(user_id: int) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+
+
+def fetch_all_users() -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        return conn.execute("SELECT id, username, display_name, role, created_at FROM users ORDER BY id").fetchall()
+
+
+def update_user(
+    user_id: int,
+    *,
+    display_name: str | None = None,
+    role: str | None = None,
+    password_hash: str | None = None,
+) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        existing = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not existing:
+            return None
+        new_display = display_name if display_name is not None else existing["display_name"]
+        new_role = role if role is not None else existing["role"]
+        new_hash = password_hash if password_hash is not None else existing["password_hash"]
+        conn.execute(
+            "UPDATE users SET display_name = ?, role = ?, password_hash = ? WHERE id = ?",
+            (new_display, new_role, new_hash, user_id),
+        )
+        return {
+            "id": user_id,
+            "username": existing["username"],
+            "display_name": new_display,
+            "role": new_role,
+            "created_at": existing["created_at"],
+        }
+
+
+def delete_user(user_id: int) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        return cur.rowcount > 0
+
+
+def fetch_users_with_board_count() -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT u.id, u.username, u.display_name, u.role, u.created_at,
+                   COUNT(b.id) AS board_count
+            FROM users u
+            LEFT JOIN boards b ON b.created_by = u.id
+            GROUP BY u.id
+            ORDER BY u.id
+            """
+        ).fetchall()
+        return rows
+
+
+def fetch_boards_by_user(user_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT id, name, description, start_date, end_date, is_archived, created_at FROM boards WHERE created_by = ? ORDER BY created_at DESC",
+            (user_id,),
+        ).fetchall()
 
 
 def log_activity(board_id: int, action: str, detail: str | None = None) -> None:
@@ -460,6 +619,67 @@ def save_team_assignment(row_index: int, team_code: str | None, board_id: int = 
         return None
 
 
+def clear_team_row(board_id: int, row_index: int) -> dict[str, Any]:
+    """Remove team assignment and delete all items (+ their links) on a row,
+    then shift higher rows down to fill the gap."""
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        # Find items on this row
+        items = conn.execute(
+            "SELECT id, issue_key, title FROM board_items WHERE board_id = ? AND row_index = ?",
+            (board_id, row_index),
+        ).fetchall()
+        item_ids = [r["id"] for r in items]
+
+        # Delete links referencing those items
+        if item_ids:
+            placeholders = ",".join("?" * len(item_ids))
+            conn.execute(
+                f"DELETE FROM board_item_links WHERE source_item_id IN ({placeholders}) OR target_item_id IN ({placeholders})",
+                item_ids + item_ids,
+            )
+            # Log transactions for each deleted item
+            for item in items:
+                old_state = {"id": item["id"], "issue_key": item["issue_key"], "title": item["title"]}
+                conn.execute(
+                    "INSERT INTO board_transactions (board_item_id, action, old_state, new_state, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (item["id"], "DELETE", json.dumps(old_state), None, now),
+                )
+            # Delete items
+            conn.execute(
+                f"DELETE FROM board_items WHERE id IN ({placeholders})",
+                item_ids,
+            )
+
+        # Remove team assignment
+        conn.execute(
+            "DELETE FROM row_team_assignments WHERE board_id = ? AND row_index = ?",
+            (board_id, row_index),
+        )
+
+        # ── Shift higher rows down by 1 to fill the gap ──
+        max_row = 10
+        for ri in range(row_index + 1, max_row + 1):
+            new_ri = ri - 1
+            new_label = f"Team#{new_ri}"
+            # Shift items
+            conn.execute(
+                "UPDATE board_items SET row_index = ?, row_label = ?, updated_at = ? WHERE board_id = ? AND row_index = ?",
+                (new_ri, new_label, now, board_id, ri),
+            )
+            # Shift team assignments: delete target slot first (to avoid PK conflict), then update
+            conn.execute(
+                "DELETE FROM row_team_assignments WHERE board_id = ? AND row_index = ?",
+                (board_id, new_ri),
+            )
+            conn.execute(
+                "UPDATE row_team_assignments SET row_index = ? WHERE board_id = ? AND row_index = ?",
+                (new_ri, board_id, ri),
+            )
+
+        return {"deleted_items": len(item_ids), "item_ids": item_ids}
+
+
 def fetch_links(board_id: int = 0) -> list[dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute(
@@ -554,12 +774,14 @@ def insert_board(
     description: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    created_by: int | None = None,
+    board_type: str = "pi_planning",
 ) -> dict[str, Any]:
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO boards (name, description, start_date, end_date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (name, description, start_date, end_date, now, now),
+            "INSERT INTO boards (name, description, start_date, end_date, created_by, board_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, description, start_date, end_date, created_by, board_type, now, now),
         )
         row = conn.execute("SELECT * FROM boards WHERE id = ?", (cur.lastrowid,)).fetchone()
         return row
@@ -593,7 +815,214 @@ def archive_board(board_id: int) -> dict[str, Any] | None:
         return row
 
 
+def assign_board_owner(board_id: int, user_id: int) -> dict[str, Any] | None:
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE boards SET created_by = ?, updated_at = ? WHERE id = ?",
+            (user_id, now, board_id),
+        )
+        row = conn.execute("SELECT * FROM boards WHERE id = ?", (board_id,)).fetchone()
+        return row
+
+
 def delete_board_record(board_id: int) -> bool:
     with get_conn() as conn:
+        # Cascade-delete all data associated with the board
+        item_ids = [r["id"] for r in conn.execute("SELECT id FROM board_items WHERE board_id = ?", (board_id,)).fetchall()]
+        if item_ids:
+            placeholders = ",".join("?" * len(item_ids))
+            conn.execute(f"DELETE FROM board_item_links WHERE source_item_id IN ({placeholders}) OR target_item_id IN ({placeholders})", item_ids + item_ids)
+            conn.execute(f"DELETE FROM board_transactions WHERE board_item_id IN ({placeholders})", item_ids)
+        conn.execute("DELETE FROM board_items WHERE board_id = ?", (board_id,))
+        conn.execute("DELETE FROM row_team_assignments WHERE board_id = ?", (board_id,))
+        conn.execute("DELETE FROM board_activity WHERE board_id = ?", (board_id,))
+        conn.execute("DELETE FROM kanban_cards WHERE board_id = ?", (board_id,))
+        conn.execute("DELETE FROM kanban_columns WHERE board_id = ?", (board_id,))
+        conn.execute("DELETE FROM kanban_rows WHERE board_id = ?", (board_id,))
         cur = conn.execute("DELETE FROM boards WHERE id = ?", (board_id,))
         return cur.rowcount > 0
+
+
+# ── Kanban helpers ───────────────────────────────────────────────────────
+
+def fetch_kanban_columns(board_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM kanban_columns WHERE board_id = ? ORDER BY position", (board_id,)
+        ).fetchall()
+
+
+def insert_kanban_column(board_id: int, name: str, color: str = "#3b82f6") -> dict[str, Any]:
+    with get_conn() as conn:
+        max_pos = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) as mp FROM kanban_columns WHERE board_id = ?", (board_id,)
+        ).fetchone()["mp"]
+        cur = conn.execute(
+            "INSERT INTO kanban_columns (board_id, name, color, position) VALUES (?, ?, ?, ?)",
+            (board_id, name, color, max_pos + 1),
+        )
+        return conn.execute("SELECT * FROM kanban_columns WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+
+def update_kanban_column(col_id: int, name: str, color: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        conn.execute("UPDATE kanban_columns SET name = ?, color = ? WHERE id = ?", (name, color, col_id))
+        return conn.execute("SELECT * FROM kanban_columns WHERE id = ?", (col_id,)).fetchone()
+
+
+def delete_kanban_column(col_id: int) -> bool:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM kanban_cards WHERE column_id = ?", (col_id,))
+        return conn.execute("DELETE FROM kanban_columns WHERE id = ?", (col_id,)).rowcount > 0
+
+
+def fetch_kanban_rows(board_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM kanban_rows WHERE board_id = ? ORDER BY position", (board_id,)
+        ).fetchall()
+
+
+def insert_kanban_row(board_id: int, name: str, color: str = "#6b7280") -> dict[str, Any]:
+    with get_conn() as conn:
+        max_pos = conn.execute(
+            "SELECT COALESCE(MAX(position), -1) as mp FROM kanban_rows WHERE board_id = ?", (board_id,)
+        ).fetchone()["mp"]
+        cur = conn.execute(
+            "INSERT INTO kanban_rows (board_id, name, color, position) VALUES (?, ?, ?, ?)",
+            (board_id, name, color, max_pos + 1),
+        )
+        return conn.execute("SELECT * FROM kanban_rows WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+
+def update_kanban_row(row_id: int, name: str, color: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        conn.execute("UPDATE kanban_rows SET name = ?, color = ? WHERE id = ?", (name, color, row_id))
+        return conn.execute("SELECT * FROM kanban_rows WHERE id = ?", (row_id,)).fetchone()
+
+
+def delete_kanban_row(row_id: int) -> bool:
+    with get_conn() as conn:
+        conn.execute("DELETE FROM kanban_cards WHERE row_id = ?", (row_id,))
+        return conn.execute("DELETE FROM kanban_rows WHERE id = ?", (row_id,)).rowcount > 0
+
+
+def fetch_kanban_cards(board_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM kanban_cards WHERE board_id = ? ORDER BY position", (board_id,)
+        ).fetchall()
+
+
+def insert_kanban_card(board_id: int, column_id: int, row_id: int | None, title: str, color: str = "#1f6688",
+                       issue_key: str | None = None, ticket_source: str | None = None,
+                       description: str | None = None) -> dict[str, Any]:
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        if row_id is not None:
+            max_pos = conn.execute(
+                "SELECT COALESCE(MAX(position), -1) as mp FROM kanban_cards WHERE board_id = ? AND column_id = ? AND row_id = ?",
+                (board_id, column_id, row_id),
+            ).fetchone()["mp"]
+        else:
+            max_pos = conn.execute(
+                "SELECT COALESCE(MAX(position), -1) as mp FROM kanban_cards WHERE board_id = ? AND column_id = ? AND row_id IS NULL",
+                (board_id, column_id),
+            ).fetchone()["mp"]
+        cur = conn.execute(
+            "INSERT INTO kanban_cards (board_id, column_id, row_id, title, color, issue_key, ticket_source, description, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (board_id, column_id, row_id, title, color, issue_key, ticket_source, description, max_pos + 1, now, now),
+        )
+        return conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+
+def update_kanban_card(card_id: int, title: str | None = None, column_id: int | None = None, row_id: int | None = None, color: str | None = None) -> dict[str, Any] | None:
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        card = conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (card_id,)).fetchone()
+        if not card:
+            return None
+        conn.execute(
+            "UPDATE kanban_cards SET title = ?, column_id = ?, row_id = ?, color = ?, updated_at = ? WHERE id = ?",
+            (
+                title if title is not None else card["title"],
+                column_id if column_id is not None else card["column_id"],
+                row_id if row_id is not None else card["row_id"],
+                color if color is not None else card["color"],
+                now,
+                card_id,
+            ),
+        )
+        return conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (card_id,)).fetchone()
+
+
+def delete_kanban_card(card_id: int) -> bool:
+    with get_conn() as conn:
+        return conn.execute("DELETE FROM kanban_cards WHERE id = ?", (card_id,)).rowcount > 0
+
+
+# ── Credentials management ──────────────────────────────────────────────
+
+def init_credentials_table() -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                label TEXT,
+                encrypted_data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, provider),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+
+def upsert_credential(user_id: int, provider: str, encrypted_data: str, label: str | None = None) -> dict[str, Any]:
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM user_credentials WHERE user_id = ? AND provider = ?",
+            (user_id, provider),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE user_credentials SET encrypted_data = ?, label = ?, updated_at = ? WHERE id = ?",
+                (encrypted_data, label, now, existing["id"]),
+            )
+            return conn.execute("SELECT id, user_id, provider, label, created_at, updated_at FROM user_credentials WHERE id = ?", (existing["id"],)).fetchone()
+        else:
+            cur = conn.execute(
+                "INSERT INTO user_credentials (user_id, provider, encrypted_data, label, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, provider, encrypted_data, label, now, now),
+            )
+            return conn.execute("SELECT id, user_id, provider, label, created_at, updated_at FROM user_credentials WHERE id = ?", (cur.lastrowid,)).fetchone()
+
+
+def fetch_credentials_by_user(user_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT id, user_id, provider, label, created_at, updated_at FROM user_credentials WHERE user_id = ? ORDER BY provider",
+            (user_id,),
+        ).fetchall()
+
+
+def fetch_credential(user_id: int, provider: str) -> dict[str, Any] | None:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM user_credentials WHERE user_id = ? AND provider = ?",
+            (user_id, provider),
+        ).fetchone()
+
+
+def delete_credential(user_id: int, provider: str) -> bool:
+    with get_conn() as conn:
+        return conn.execute(
+            "DELETE FROM user_credentials WHERE user_id = ? AND provider = ?",
+            (user_id, provider),
+        ).rowcount > 0

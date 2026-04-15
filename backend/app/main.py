@@ -1,12 +1,17 @@
 import os
-from datetime import date
+import sqlite3
+from datetime import date, datetime, timedelta, timezone
 from calendar import month_name
 from base64 import b64encode
 
+import bcrypt
+import jwt
 import requests
+from cryptography.fernet import Fernet
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 from app.db import (
@@ -22,6 +27,7 @@ from app.db import (
     insert_link,
     insert_item,
     save_team_assignment,
+    clear_team_row,
     delete_link,
     update_item_external_fields,
     update_item_position,
@@ -31,13 +37,113 @@ from app.db import (
     fetch_board_by_id,
     update_board,
     archive_board,
+    assign_board_owner,
     delete_board_record,
     # ── activity log ──
     log_activity,
     fetch_activity,
+    # ── auth ──
+    create_user,
+    fetch_user_by_username,
+    fetch_user_by_id,
+    fetch_all_users,
+    delete_user,
+    update_user,
+    fetch_users_with_board_count,
+    fetch_boards_by_user,
+    # ── kanban ──
+    fetch_kanban_columns,
+    insert_kanban_column,
+    update_kanban_column,
+    delete_kanban_column,
+    fetch_kanban_rows,
+    insert_kanban_row,
+    update_kanban_row,
+    delete_kanban_row,
+    fetch_kanban_cards,
+    insert_kanban_card,
+    update_kanban_card,
+    delete_kanban_card,
+    # ── credentials ──
+    init_credentials_table,
+    upsert_credential,
+    fetch_credentials_by_user,
+    fetch_credential,
+    delete_credential,
 )
 
 load_dotenv()
+
+# ── Encryption config (for credential storage) ──────────────────────────
+_FERNET_KEY = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
+if not _FERNET_KEY:
+    _FERNET_KEY = Fernet.generate_key().decode()
+_fernet = Fernet(_FERNET_KEY.encode() if isinstance(_FERNET_KEY, str) else _FERNET_KEY)
+
+# ── Auth config ──────────────────────────────────────────────────────────
+JWT_SECRET = os.getenv("JWT_SECRET", "hcph-pi-board-secret-change-me")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = 12
+
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+ADMIN_DEFAULT_USERNAME = "admin"
+ADMIN_DEFAULT_PASSWORD = "admin"
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    display_name: str = Field(..., min_length=1, max_length=100)
+    password: str = Field(..., min_length=4)
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def _verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
+
+
+def _create_token(user_id: int, username: str, role: str) -> str:
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "role": role,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRE_HOURS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _decode_token(token: str) -> dict:
+    return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+
+
+def get_current_user(creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme)) -> dict:
+    if not creds:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = _decode_token(creds.credentials)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = fetch_user_by_id(payload["sub"])
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
+
 
 MILESTONE_ROW_INDEX = 0
 ROWS = ["Milestone"] + [f"Team#{i}" for i in range(1, 11)]
@@ -60,6 +166,7 @@ class CreateMilestoneRequest(BaseModel):
     title: str | None = None
     target_date: date
     end_date: date
+    is_temp: bool = False
 
 
 class MoveItemRequest(BaseModel):
@@ -90,7 +197,7 @@ class CreateLinkRequest(BaseModel):
     board_id: int
     source_item_id: int = Field(..., gt=0)
     target_item_id: int = Field(..., gt=0)
-    link_type: str = Field(..., pattern=r"^(blocks|depends_on|relates_to)$")
+    link_type: str = Field(..., pattern=r"^(blocks|is blocked by|is worklog for|has worklog in|depends on|is dependant|relates to|external link)$")
 
 
 def build_planning_columns(start: date, end: date | None = None) -> list[dict]:
@@ -168,8 +275,8 @@ def _extract_description_text(value: object) -> str | None:
     return "\n".join(lines)
 
 
-def fetch_jira_issue(issue_key: str) -> dict:
-    jira_base, auth, verify = _get_jira_connection_settings()
+def fetch_jira_issue(issue_key: str, user_id: int | None = None) -> dict:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
 
     endpoint = (
         f"{jira_base}/rest/api/2/issue/{issue_key}"
@@ -178,7 +285,28 @@ def fetch_jira_issue(issue_key: str) -> dict:
 
     try:
         response = requests.get(endpoint, auth=auth, timeout=15, verify=verify)
+        if response.status_code == 401:
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "JIRA authentication failed — username or password/token is incorrect. "
+                    "Please check JIRA_USERNAME and JIRA_PASSWORD in the server .env file."
+                ),
+            )
+        if response.status_code == 403:
+            denied = response.headers.get("X-Authentication-Denied-Reason", "")
+            login_reason = response.headers.get("X-Seraph-LoginReason", "")
+            if "CAPTCHA" in denied.upper() or "DENIED" in login_reason.upper():
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "JIRA account is locked due to repeated failed logins (CAPTCHA triggered). "
+                        "Please log out and log back in at your JIRA site to clear the lockout, then retry."
+                    ),
+                )
         response.raise_for_status()
+    except HTTPException:
+        raise
     except requests.HTTPError as exc:
         detail = f"Failed to fetch issue from JIRA: {exc}"
         raise HTTPException(status_code=400, detail=detail) from exc
@@ -211,16 +339,16 @@ def fetch_jira_issue(issue_key: str) -> dict:
     }
 
 
-def fetch_jira_summary(issue_key: str) -> str:
-    issue = fetch_jira_issue(issue_key)
+def fetch_jira_summary(issue_key: str, user_id: int | None = None) -> str:
+    issue = fetch_jira_issue(issue_key, user_id)
     issue_type = issue["issue_type"]
     if issue_type.lower() != "idea":
         raise HTTPException(status_code=400, detail="Only IDEA issue type is allowed for Milestone row")
     return issue["summary"]
 
 
-def fetch_jira_projects() -> list[dict]:
-    jira_base, auth, verify = _get_jira_connection_settings()
+def fetch_jira_projects(user_id: int | None = None) -> list[dict]:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
     endpoint = f"{jira_base}/rest/api/2/project"
 
     try:
@@ -252,8 +380,8 @@ def fetch_jira_projects() -> list[dict]:
     return normalized
 
 
-def create_jira_issue(summary: str, issue_type_name: str = "Task", project_key: str | None = None, extra_fields: dict | None = None) -> dict:
-    jira_base, auth, verify = _get_jira_connection_settings()
+def create_jira_issue(summary: str, issue_type_name: str = "Task", project_key: str | None = None, extra_fields: dict | None = None, user_id: int | None = None) -> dict:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
     resolved_project_key = (project_key or os.getenv("JIRA_PROJECT_KEY") or "").strip().upper()
     if not resolved_project_key:
         raise HTTPException(status_code=400, detail="JIRA project key is required")
@@ -301,24 +429,85 @@ def create_jira_issue(summary: str, issue_type_name: str = "Task", project_key: 
     return {"issue_key": created_key}
 
 
-def _get_jira_connection_settings() -> tuple[str, tuple[str, str] | None, bool | str]:
-    jira_base = (os.getenv("JIRA_BASE_URL") or os.getenv("JIRA_URL") or "").rstrip("/")
-    username = os.getenv("JIRA_USERNAME")
-    token = os.getenv("JIRA_API_TOKEN") or os.getenv("JIRA_PASSWORD")
+def _decrypt_user_credential(user_id: int, provider: str) -> dict | None:
+    """Decrypt and return the stored credentials for a user+provider, or None."""
+    import json as _json
+    cred = fetch_credential(user_id, provider)
+    if not cred or not cred.get("encrypted_data"):
+        return None
+    try:
+        decrypted = _fernet.decrypt(cred["encrypted_data"].encode()).decode()
+        return _json.loads(decrypted)
+    except Exception:
+        return None
+
+
+def _get_jira_connection_settings(user_id: int | None = None) -> tuple[str, tuple[str, str] | None, bool | str]:
+    jira_base = ""
+    username = ""
+    token = ""
+
+    # Try DB credentials first
+    if user_id:
+        cred = _decrypt_user_credential(user_id, "jira")
+        if cred:
+            jira_base = (cred.get("jira_url") or "").rstrip("/")
+            username = cred.get("email") or ""
+            token = cred.get("password") or ""
+
+    # Fall back to env vars if DB didn't provide values
+    if not jira_base:
+        jira_base = (os.getenv("JIRA_BASE_URL") or os.getenv("JIRA_URL") or "").rstrip("/")
+    if not username:
+        username = os.getenv("JIRA_USERNAME") or ""
+    if not token:
+        token = os.getenv("JIRA_API_TOKEN") or os.getenv("JIRA_PASSWORD") or ""
+
     verify_ssl_raw = (os.getenv("JIRA_VERIFY_SSL") or "true").strip().lower()
     verify_ssl = verify_ssl_raw not in {"0", "false", "no"}
     ca_bundle_path = os.getenv("JIRA_CA_BUNDLE_PATH")
 
     if not jira_base:
-        raise HTTPException(status_code=500, detail="JIRA_BASE_URL is not configured")
+        raise HTTPException(status_code=500, detail="JIRA URL is not configured. Please add your Jira credentials in Configuration.")
 
     auth = (username, token) if username and token else None
     verify: bool | str = ca_bundle_path if ca_bundle_path else verify_ssl
     return jira_base, auth, verify
 
 
-def _resolve_jira_worklog_link_type() -> dict:
-    jira_base, auth, verify = _get_jira_connection_settings()
+def _jira_ssl_verify() -> bool | str:
+    """Return the SSL verify value based on env config."""
+    verify_ssl_raw = (os.getenv("JIRA_VERIFY_SSL") or "true").strip().lower()
+    verify_ssl = verify_ssl_raw not in {"0", "false", "no"}
+    ca_bundle_path = os.getenv("JIRA_CA_BUNDLE_PATH")
+    return ca_bundle_path if ca_bundle_path else verify_ssl
+
+
+def _get_ado_connection_settings(user_id: int | None = None) -> tuple[str, str, str]:
+    """Return (organization, project, pat) for Azure DevOps."""
+    organization = ""
+    pat = ""
+
+    # Try DB credentials first
+    if user_id:
+        cred = _decrypt_user_credential(user_id, "ado")
+        if cred:
+            organization = (cred.get("ado_org") or "").strip()
+            pat = (cred.get("pat") or "").strip()
+
+    # Fall back to env vars
+    if not organization:
+        organization = (os.getenv("AZURE_ORG") or "").strip()
+    if not pat:
+        pat = (os.getenv("AZURE_PAT") or "").strip()
+
+    project = (os.getenv("AZURE_PROJECT") or "").strip()
+
+    return organization, project, pat
+
+
+def _resolve_jira_worklog_link_type(user_id: int | None = None) -> dict:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
     endpoint = f"{jira_base}/rest/api/2/issueLinkType"
 
     try:
@@ -343,9 +532,9 @@ def _resolve_jira_worklog_link_type() -> dict:
     raise HTTPException(status_code=400, detail='JIRA link type "has worklog in" is not available')
 
 
-def _create_jira_worklog_link(worklog_issue_key: str, idea_issue_key: str) -> None:
-    link_type = _resolve_jira_worklog_link_type()
-    jira_base, auth, verify = _get_jira_connection_settings()
+def _create_jira_worklog_link(worklog_issue_key: str, idea_issue_key: str, user_id: int | None = None) -> None:
+    link_type = _resolve_jira_worklog_link_type(user_id)
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
     endpoint = f"{jira_base}/rest/api/2/issueLink"
 
     inward = (link_type.get("inward") or "").strip().lower()
@@ -380,8 +569,8 @@ def _create_jira_worklog_link(worklog_issue_key: str, idea_issue_key: str) -> No
         raise HTTPException(status_code=502, detail="Could not reach JIRA server") from exc
 
 
-def _resolve_jira_link_type_by_token(token: str) -> dict:
-    jira_base, auth, verify = _get_jira_connection_settings()
+def _resolve_jira_link_type_by_token(token: str, user_id: int | None = None) -> dict:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
     endpoint = f"{jira_base}/rest/api/2/issueLinkType"
 
     try:
@@ -404,18 +593,18 @@ def _resolve_jira_link_type_by_token(token: str) -> dict:
     raise HTTPException(status_code=400, detail=f'JIRA link type containing "{token}" is not available')
 
 
-def _create_jira_blocks_link(source_issue_key: str, target_issue_key: str) -> None:
+def _create_jira_blocks_link(source_issue_key: str, target_issue_key: str, user_id: int | None = None) -> None:
     preferred_phrase = "is blocked by"
     fallback_phrase = "relates to"
     active_phrase = preferred_phrase
 
     try:
-        link_type = _resolve_jira_link_type_by_token(preferred_phrase)
+        link_type = _resolve_jira_link_type_by_token(preferred_phrase, user_id)
     except HTTPException:
-        link_type = _resolve_jira_link_type_by_token(fallback_phrase)
+        link_type = _resolve_jira_link_type_by_token(fallback_phrase, user_id)
         active_phrase = fallback_phrase
 
-    jira_base, auth, verify = _get_jira_connection_settings()
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
     endpoint = f"{jira_base}/rest/api/2/issueLink"
 
     inward = (link_type.get("inward") or "").strip().lower()
@@ -450,9 +639,9 @@ def _create_jira_blocks_link(source_issue_key: str, target_issue_key: str) -> No
         raise HTTPException(status_code=502, detail="Could not reach JIRA server") from exc
 
 
-def _create_jira_relates_link(source_issue_key: str, target_issue_key: str) -> None:
-    link_type = _resolve_jira_link_type_by_token("relates to")
-    jira_base, auth, verify = _get_jira_connection_settings()
+def _create_jira_relates_link(source_issue_key: str, target_issue_key: str, user_id: int | None = None) -> None:
+    link_type = _resolve_jira_link_type_by_token("relates to", user_id)
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
     endpoint = f"{jira_base}/rest/api/2/issueLink"
 
     payload = {
@@ -470,18 +659,51 @@ def _create_jira_relates_link(source_issue_key: str, target_issue_key: str) -> N
         raise HTTPException(status_code=502, detail="Could not reach JIRA server") from exc
 
 
-def _create_jira_link_for_board_type(source_issue_key: str, target_issue_key: str, board_link_type: str) -> None:
-    if board_link_type == "blocks":
-        _create_jira_blocks_link(source_issue_key, target_issue_key)
-        return
-    _create_jira_relates_link(source_issue_key, target_issue_key)
+def _create_jira_generic_link(source_issue_key: str, target_issue_key: str, link_phrase: str, user_id: int | None = None) -> None:
+    link_type = _resolve_jira_link_type_by_token(link_phrase, user_id)
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
+    endpoint = f"{jira_base}/rest/api/2/issueLink"
+
+    inward = (link_type.get("inward") or "").strip().lower()
+    outward = (link_type.get("outward") or "").strip().lower()
+    phrase = link_phrase.strip().lower()
+
+    if phrase == inward:
+        payload = {
+            "type": {"name": link_type["name"]},
+            "inwardIssue": {"key": source_issue_key},
+            "outwardIssue": {"key": target_issue_key},
+        }
+    elif phrase == outward:
+        payload = {
+            "type": {"name": link_type["name"]},
+            "outwardIssue": {"key": source_issue_key},
+            "inwardIssue": {"key": target_issue_key},
+        }
+    else:
+        payload = {
+            "type": {"name": link_type["name"]},
+            "outwardIssue": {"key": source_issue_key},
+            "inwardIssue": {"key": target_issue_key},
+        }
+
+    try:
+        response = requests.post(endpoint, auth=auth, json=payload, timeout=15, verify=verify)
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to create JIRA link ({link_phrase}): {exc}") from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail="Could not reach JIRA server") from exc
 
 
-def _build_ado_work_item_web_link(work_item_key: str) -> tuple[str, str]:
+def _create_jira_link_for_board_type(source_issue_key: str, target_issue_key: str, board_link_type: str, user_id: int | None = None) -> None:
+    _create_jira_generic_link(source_issue_key, target_issue_key, board_link_type, user_id)
+
+
+def _build_ado_work_item_web_link(work_item_key: str, user_id: int | None = None) -> tuple[str, str]:
     work_item_id = _extract_ado_work_item_id(work_item_key)
     template = (os.getenv("ADO_WEB_LINK_TEMPLATE") or "").strip()
-    organization = (os.getenv("AZURE_ORG") or "").strip()
-    project = (os.getenv("AZURE_PROJECT") or "").strip()
+    organization, project, _pat = _get_ado_connection_settings(user_id)
 
     if template:
         url = template.format(
@@ -500,8 +722,8 @@ def _build_ado_work_item_web_link(work_item_key: str) -> tuple[str, str]:
     return url, f"ADO {work_item_id}"
 
 
-def _create_jira_web_link(issue_key: str, url: str, title: str) -> None:
-    jira_base, auth, verify = _get_jira_connection_settings()
+def _create_jira_web_link(issue_key: str, url: str, title: str, user_id: int | None = None) -> None:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id)
     endpoint = f"{jira_base}/rest/api/2/issue/{issue_key}/remotelink"
     payload = {
         "object": {
@@ -551,13 +773,11 @@ def _extract_ado_work_item_id(work_item_key: str) -> int:
     return int(digits)
 
 
-def fetch_ado_work_item(work_item_key: str) -> dict:
-    organization = (os.getenv("AZURE_ORG") or "").strip()
-    project = (os.getenv("AZURE_PROJECT") or "").strip()
-    pat = (os.getenv("AZURE_PAT") or "").strip()
+def fetch_ado_work_item(work_item_key: str, user_id: int | None = None) -> dict:
+    organization, project, pat = _get_ado_connection_settings(user_id)
 
     if not organization or not project or not pat:
-        raise HTTPException(status_code=500, detail="AZURE_ORG, AZURE_PROJECT, and AZURE_PAT must be configured")
+        raise HTTPException(status_code=500, detail="Azure DevOps is not configured. Please add your ADO credentials in Configuration.")
 
     work_item_id = _extract_ado_work_item_id(work_item_key)
     endpoint = (
@@ -606,13 +826,11 @@ def fetch_ado_work_item(work_item_key: str) -> dict:
     }
 
 
-def create_ado_user_story(title: str) -> dict:
-    organization = (os.getenv("AZURE_ORG") or "").strip()
-    project = (os.getenv("AZURE_PROJECT") or "").strip()
-    pat = (os.getenv("AZURE_PAT") or "").strip()
+def create_ado_user_story(title: str, user_id: int | None = None) -> dict:
+    organization, project, pat = _get_ado_connection_settings(user_id)
 
     if not organization or not project or not pat:
-        raise HTTPException(status_code=500, detail="AZURE_ORG, AZURE_PROJECT, and AZURE_PAT must be configured")
+        raise HTTPException(status_code=500, detail="Azure DevOps is not configured. Please add your ADO credentials in Configuration.")
 
     endpoint = f"https://dev.azure.com/{organization}/{project}/_apis/wit/workitems/$User%20Story?api-version=7.1"
     basic_token = b64encode(f":{pat}".encode("utf-8")).decode("ascii")
@@ -671,12 +889,52 @@ app.add_middleware(
 )
 
 
+# ── Auth guard middleware ────────────────────────────────────────────────
+_PUBLIC_PATHS = {"/health", "/api/auth/login", "/api/auth/register"}
+
+
+@app.middleware("http")
+async def auth_guard(request: Request, call_next):
+    path = request.url.path
+    # Allow public paths, OPTIONS (CORS preflight), and non-API routes
+    if path in _PUBLIC_PATHS or request.method == "OPTIONS" or not path.startswith("/api/"):
+        return await call_next(request)
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.startswith("Bearer "):
+        from starlette.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+    token = auth_header.split(" ", 1)[1]
+    try:
+        payload = _decode_token(token)
+        user = fetch_user_by_id(payload["sub"])
+        if not user:
+            from starlette.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "User not found"})
+        request.state.user = user
+    except jwt.ExpiredSignatureError:
+        from starlette.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"detail": "Token expired"})
+    except jwt.InvalidTokenError:
+        from starlette.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"detail": "Invalid token"})
+    return await call_next(request)
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
+    init_credentials_table()
+    # Seed default admin account if it doesn't exist
+    if not fetch_user_by_username(ADMIN_DEFAULT_USERNAME):
+        create_user(
+            username=ADMIN_DEFAULT_USERNAME,
+            display_name="Administrator",
+            password_hash=_hash_password(ADMIN_DEFAULT_PASSWORD),
+            role="admin",
+        )
 
 
-def _sync_external_ticket_fields(items: list[dict]) -> list[dict]:
+def _sync_external_ticket_fields(items: list[dict], user_id: int | None = None) -> list[dict]:
     synced: list[dict] = []
     for item in items:
         source = _normalize_ticket_source(item.get("ticket_source"))
@@ -687,7 +945,7 @@ def _sync_external_ticket_fields(items: list[dict]) -> list[dict]:
             continue
 
         try:
-            issue = fetch_jira_issue(issue_key)
+            issue = fetch_jira_issue(issue_key, user_id)
         except HTTPException:
             # Keep cached values when JIRA is unavailable or key is invalid.
             synced.append(item)
@@ -747,7 +1005,7 @@ def _verify_board(items: list[dict], links: list[dict], total_slots: int = 16) -
 
 
 @app.get("/api/board")
-def get_board(board_id: int = Query(...), refresh_external: bool = Query(False)) -> dict:
+def get_board(board_id: int = Query(...), refresh_external: bool = Query(False), user: dict = Depends(get_current_user)) -> dict:
     board_meta = fetch_board_by_id(board_id)
     if not board_meta:
         raise HTTPException(status_code=404, detail="Board not found")
@@ -756,7 +1014,7 @@ def get_board(board_id: int = Query(...), refresh_external: bool = Query(False))
     end = date.fromisoformat(board_meta["end_date"]) if board_meta.get("end_date") else None
     months = build_planning_columns(start, end)
 
-    items = _sync_external_ticket_fields(fetch_items(board_id)) if refresh_external else fetch_items(board_id)
+    items = _sync_external_ticket_fields(fetch_items(board_id), user["id"]) if refresh_external else fetch_items(board_id)
     links = fetch_links(board_id)
     team_assignments = fetch_team_assignments(board_id)
     return {
@@ -769,13 +1027,13 @@ def get_board(board_id: int = Query(...), refresh_external: bool = Query(False))
 
 
 @app.get("/api/jira/projects")
-def get_jira_projects() -> dict:
-    return {"projects": fetch_jira_projects()}
+def get_jira_projects_endpoint(user: dict = Depends(get_current_user)) -> dict:
+    return {"projects": fetch_jira_projects(user["id"])}
 
 
 @app.get("/api/jira/projects/{project_key}/issue-types")
-def get_jira_project_issue_types(project_key: str) -> dict:
-    jira_base, auth, verify = _get_jira_connection_settings()
+def get_jira_project_issue_types(project_key: str, user: dict = Depends(get_current_user)) -> dict:
+    jira_base, auth, verify = _get_jira_connection_settings(user["id"])
     key = project_key.strip().upper()
     if not key:
         raise HTTPException(status_code=400, detail="Project key is required")
@@ -858,9 +1116,10 @@ def get_jira_field_options(
     project_key: str = Query(...),
     issue_type: str = Query("Task"),
     field_name: str = Query(...),
+    user: dict = Depends(get_current_user),
 ) -> dict:
     """Discover field by name via /rest/api/2/field, then fetch its options via multiple fallbacks."""
-    jira_base, auth, verify = _get_jira_connection_settings()
+    jira_base, auth, verify = _get_jira_connection_settings(user["id"])
     field_lower = field_name.strip().lower()
     key = project_key.strip().upper()
     if not key or not field_lower:
@@ -936,7 +1195,7 @@ def get_jira_field_options(
 
 
 @app.post("/api/board/commit")
-def commit_board(board_id: int = Query(...)) -> dict:
+def commit_board(board_id: int = Query(...), user: dict = Depends(get_current_user)) -> dict:
     board_meta = fetch_board_by_id(board_id)
     if not board_meta:
         raise HTTPException(status_code=404, detail="Board not found")
@@ -945,7 +1204,7 @@ def commit_board(board_id: int = Query(...)) -> dict:
     months = build_planning_columns(start, end)
     total_slots = len(months) * 4
 
-    items = _sync_external_ticket_fields(fetch_items(board_id))
+    items = _sync_external_ticket_fields(fetch_items(board_id), user["id"])
     links = fetch_links(board_id)
     verification_issues = _verify_board(items, links, total_slots)
     if verification_issues:
@@ -976,7 +1235,7 @@ def commit_board(board_id: int = Query(...)) -> dict:
 
 
 @app.post("/api/milestones")
-def create_milestone(payload: CreateMilestoneRequest) -> dict:
+def create_milestone(payload: CreateMilestoneRequest, user: dict = Depends(get_current_user)) -> dict:
     board_meta = fetch_board_by_id(payload.board_id)
     if not board_meta:
         raise HTTPException(status_code=404, detail="Board not found")
@@ -989,6 +1248,37 @@ def create_milestone(payload: CreateMilestoneRequest) -> dict:
         raise HTTPException(status_code=400, detail="End date must be on or after target date")
 
     ticket_source = _normalize_ticket_source(payload.ticket_source)
+
+    # ── Temp (unsynced) milestone: skip JIRA fetch entirely ──
+    if payload.is_temp:
+        temp_title = (payload.title or "").strip()
+        if not temp_title:
+            raise HTTPException(status_code=400, detail="Title is required for temp milestones")
+        raw_issue_key = (payload.issue_key or "").strip().upper() or None
+        try:
+            item = insert_item(
+                {
+                    "issue_key": raw_issue_key,
+                    "title": temp_title,
+                    "item_type": "IDEA",
+                    "row_index": MILESTONE_ROW_INDEX,
+                    "row_label": ROWS[MILESTONE_ROW_INDEX],
+                    "start_slot": start_slot,
+                    "end_slot": end_slot,
+                    "target_date": payload.target_date.isoformat(),
+                    "end_date": payload.end_date.isoformat(),
+                    "ticket_source": ticket_source,
+                    "sync_status": "unsynced",
+                    "color": "#6b7280",
+                },
+                board_id=payload.board_id,
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=409, detail=f"{raw_issue_key or temp_title} already exists on this board")
+        log_activity(payload.board_id, "Added temp milestone", f"{raw_issue_key or '(no key)'}: {temp_title}")
+        return item
+
+    # ── Normal (synced) milestone flow ──
     if ticket_source != SOURCE_JIRA:
         raise HTTPException(status_code=400, detail="Milestones only support JIRA IDEA tickets")
 
@@ -1000,37 +1290,40 @@ def create_milestone(payload: CreateMilestoneRequest) -> dict:
     issue: dict | None = None
 
     if ticket_source == SOURCE_JIRA:
-        issue = fetch_jira_issue(issue_key)
+        issue = fetch_jira_issue(issue_key, user["id"])
         if issue["issue_type"].lower() != "idea":
             raise HTTPException(status_code=400, detail="Only IDEA issue type is allowed for Milestone row")
     else:
-        issue = fetch_ado_work_item(issue_key)
+        issue = fetch_ado_work_item(issue_key, user["id"])
         _ensure_ado_user_story(issue, "Milestone row")
 
     issue_key = issue["issue_key"]
     title = issue["summary"]
 
-    item = insert_item(
-        {
-            "issue_key": issue_key or None,
-            "title": title,
-            "item_type": "IDEA",
-            "row_index": MILESTONE_ROW_INDEX,
-            "row_label": ROWS[MILESTONE_ROW_INDEX],
-            "start_slot": start_slot,
-            "end_slot": end_slot,
-            "target_date": payload.target_date.isoformat(),
-            "end_date": payload.end_date.isoformat(),
-            "ticket_source": ticket_source,
-            "external_work_item_type": issue["issue_type"] if issue else None,
-            "jira_assignee": issue["assignee"] if issue else None,
-            "jira_shirt_size": issue["shirt_size"] if issue else None,
-            "jira_status": issue["status"] if issue else None,
-            "jira_description": issue["description"] if issue else None,
-            "color": source_tile_color(ticket_source),
-        },
-        board_id=payload.board_id,
-    )
+    try:
+        item = insert_item(
+            {
+                "issue_key": issue_key or None,
+                "title": title,
+                "item_type": "IDEA",
+                "row_index": MILESTONE_ROW_INDEX,
+                "row_label": ROWS[MILESTONE_ROW_INDEX],
+                "start_slot": start_slot,
+                "end_slot": end_slot,
+                "target_date": payload.target_date.isoformat(),
+                "end_date": payload.end_date.isoformat(),
+                "ticket_source": ticket_source,
+                "external_work_item_type": issue["issue_type"] if issue else None,
+                "jira_assignee": issue["assignee"] if issue else None,
+                "jira_shirt_size": issue["shirt_size"] if issue else None,
+                "jira_status": issue["status"] if issue else None,
+                "jira_description": issue["description"] if issue else None,
+                "color": source_tile_color(ticket_source),
+            },
+            board_id=payload.board_id,
+        )
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail=f"{issue_key} already exists on this board")
     log_activity(payload.board_id, "Added milestone", f"{issue_key}: {title}")
     return item
 
@@ -1063,7 +1356,7 @@ def move_item(item_id: int, payload: MoveItemRequest) -> dict:
 
 
 @app.post("/api/tasks")
-def create_task(payload: CreateTaskRequest) -> dict:
+def create_task(payload: CreateTaskRequest, user: dict = Depends(get_current_user)) -> dict:
     if payload.end_slot < payload.start_slot:
         raise HTTPException(status_code=400, detail="End slot must be on or after start slot")
 
@@ -1081,9 +1374,9 @@ def create_task(payload: CreateTaskRequest) -> dict:
 
     if issue_key:
         if ticket_source == SOURCE_JIRA:
-            issue = fetch_jira_issue(issue_key)
+            issue = fetch_jira_issue(issue_key, user["id"])
         else:
-            issue = fetch_ado_work_item(issue_key)
+            issue = fetch_ado_work_item(issue_key, user["id"])
             _ensure_ado_user_story(issue, "Task row")
 
         issue_key = issue["issue_key"]
@@ -1099,10 +1392,11 @@ def create_task(payload: CreateTaskRequest) -> dict:
                     issue_type_name=issue_type_name,
                     project_key=payload.jira_project_key,
                     extra_fields=payload.jira_extra_fields,
+                    user_id=user["id"],
                 )
                 jira_created = True
                 jira_created_issue_key = created["issue_key"]
-                issue = fetch_jira_issue(created["issue_key"])
+                issue = fetch_jira_issue(created["issue_key"], user["id"])
                 issue_key = issue["issue_key"]
                 title = issue["summary"]
             except Exception as exc:
@@ -1110,10 +1404,10 @@ def create_task(payload: CreateTaskRequest) -> dict:
                 sync_error_message = str(exc)
         else:
             try:
-                created = create_ado_user_story(title=title)
+                created = create_ado_user_story(title=title, user_id=user["id"])
                 ado_created = True
                 ado_created_issue_key = created["issue_key"]
-                issue = fetch_ado_work_item(created["issue_key"])
+                issue = fetch_ado_work_item(created["issue_key"], user["id"])
                 _ensure_ado_user_story(issue, "Task row")
                 issue_key = issue["issue_key"]
                 title = issue["summary"]
@@ -1180,8 +1474,32 @@ def set_team_assignment(row_index: int, payload: TeamAssignmentRequest) -> dict:
     }
 
 
+@app.delete("/api/team-rows/{row_index}")
+def delete_team_row(row_index: int, board_id: int = Query(..., gt=0)) -> dict:
+    if row_index <= 0 or row_index >= len(ROWS):
+        raise HTTPException(status_code=400, detail="Invalid team row index")
+
+    result = clear_team_row(board_id=board_id, row_index=row_index)
+    log_activity(board_id, "Cleared team row", f"Row {row_index}: removed team + {result['deleted_items']} item(s)")
+    return {
+        "status": "cleared",
+        "board_id": board_id,
+        "row_index": row_index,
+        "deleted_items": result["deleted_items"],
+    }
+
+
+@app.get("/api/team-rows/{row_index}/items-count")
+def get_team_row_items_count(row_index: int, board_id: int = Query(..., gt=0)) -> dict:
+    if row_index <= 0 or row_index >= len(ROWS):
+        raise HTTPException(status_code=400, detail="Invalid team row index")
+    items = fetch_items(board_id)
+    count = sum(1 for item in items if item["row_index"] == row_index)
+    return {"board_id": board_id, "row_index": row_index, "items_count": count}
+
+
 @app.post("/api/links")
-def create_link(payload: CreateLinkRequest) -> dict:
+def create_link(payload: CreateLinkRequest, user: dict = Depends(get_current_user)) -> dict:
     if payload.source_item_id == payload.target_item_id:
         raise HTTPException(status_code=400, detail="Cannot link an item to itself")
 
@@ -1199,44 +1517,41 @@ def create_link(payload: CreateLinkRequest) -> dict:
     target_source = _normalize_ticket_source(target_item.get("ticket_source"))
     jira_link_synced = False
 
+    # If either item is unsynced, skip all external linking and just save locally
+    source_unsynced = source_item.get("sync_status") == "unsynced"
+    target_unsynced = target_item.get("sync_status") == "unsynced"
+    skip_external_link = source_unsynced or target_unsynced
+
     idea_item = source_item if source_is_idea else (target_item if target_is_idea else None)
     worklog_item = target_item if source_is_idea else (source_item if target_is_idea else None)
 
-    # Business rule: IDEA <-> JIRA Task links should sync to JIRA as "has worklog in".
-    if idea_item and worklog_item:
-        idea_key = (idea_item.get("issue_key") or "").strip()
-        worklog_key = (worklog_item.get("issue_key") or "").strip()
-        idea_source = _normalize_ticket_source(idea_item.get("ticket_source"))
-        worklog_source = _normalize_ticket_source(worklog_item.get("ticket_source"))
-
-        if idea_key and worklog_key and idea_source == SOURCE_JIRA and worklog_source == SOURCE_JIRA:
-            _create_jira_worklog_link(worklog_key, idea_key)
+    if not skip_external_link:
+        # Use the user's selected link type for all JIRA-to-JIRA links
+        if (
+            source_key
+            and target_key
+            and source_source == SOURCE_JIRA
+            and target_source == SOURCE_JIRA
+        ):
+            _create_jira_link_for_board_type(source_key, target_key, payload.link_type, user["id"])
             jira_link_synced = True
 
-    if (
-        not jira_link_synced
-        and source_key
-        and target_key
-        and source_source == SOURCE_JIRA
-        and target_source == SOURCE_JIRA
-    ):
-        _create_jira_link_for_board_type(source_key, target_key, payload.link_type)
-        jira_link_synced = True
+        if idea_item and worklog_item:
+            idea_key = (idea_item.get("issue_key") or "").strip()
+            worklog_key = (worklog_item.get("issue_key") or "").strip()
+            idea_source = _normalize_ticket_source(idea_item.get("ticket_source"))
+            worklog_source = _normalize_ticket_source(worklog_item.get("ticket_source"))
 
-    if idea_item and worklog_item:
-        idea_key = (idea_item.get("issue_key") or "").strip()
-        worklog_key = (worklog_item.get("issue_key") or "").strip()
-        idea_source = _normalize_ticket_source(idea_item.get("ticket_source"))
-        worklog_source = _normalize_ticket_source(worklog_item.get("ticket_source"))
-
-        if idea_key and worklog_key and idea_source == SOURCE_JIRA and worklog_source == SOURCE_ADO:
-            ado_url, ado_title = _build_ado_work_item_web_link(worklog_key)
-            _create_jira_web_link(idea_key, ado_url, ado_title)
-            jira_link_synced = True
+            if idea_key and worklog_key and idea_source == SOURCE_JIRA and worklog_source == SOURCE_ADO:
+                ado_url, ado_title = _build_ado_work_item_web_link(worklog_key, user["id"])
+                _create_jira_web_link(idea_key, ado_url, ado_title, user["id"])
+                jira_link_synced = True
 
     try:
         created = insert_link(payload.source_item_id, payload.target_item_id, payload.link_type)
         created["jira_link_synced"] = jira_link_synced
+        if skip_external_link:
+            created["message"] = "Link saved locally only (one or both items are unsynced)"
         src_label = (source_item.get("issue_key") or source_item.get("title", "?"))[:30]
         tgt_label = (target_item.get("issue_key") or target_item.get("title", "?"))[:30]
         log_activity(payload.board_id, "Linked tickets", f"{src_label} \u2192 {tgt_label} ({payload.link_type})")
@@ -1251,6 +1566,355 @@ def remove_link(link_id: int) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail="Link not found")
     return {"status": "deleted", "link_id": link_id}
+
+
+# ── Auth endpoints ───────────────────────────────────────────────────────
+
+@app.post("/api/auth/login")
+def auth_login(payload: LoginRequest) -> dict:
+    user = fetch_user_by_username(payload.username)
+    if not user or not _verify_password(payload.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = _create_token(user["id"], user["username"], user["role"])
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "display_name": user["display_name"],
+            "role": user["role"],
+        },
+    }
+
+
+@app.post("/api/auth/register")
+def auth_register(payload: RegisterRequest) -> dict:
+    existing = fetch_user_by_username(payload.username)
+    if existing:
+        raise HTTPException(status_code=409, detail="Username already taken")
+    hashed = _hash_password(payload.password)
+    user = create_user(
+        username=payload.username,
+        display_name=payload.display_name,
+        password_hash=hashed,
+        role="user",
+    )
+    token = _create_token(user["id"], user["username"], user["role"])
+    return {
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "username": user["username"],
+            "display_name": user["display_name"],
+            "role": user["role"],
+        },
+    }
+
+
+@app.get("/api/auth/me")
+def auth_me(user: dict = Depends(get_current_user)) -> dict:
+    return {
+        "id": user["id"],
+        "username": user["username"],
+        "display_name": user["display_name"],
+        "role": user["role"],
+    }
+
+
+class ProfileUpdateRequest(BaseModel):
+    display_name: str | None = Field(None, min_length=1, max_length=100)
+    password: str | None = Field(None, min_length=4)
+    current_password: str | None = None
+
+
+@app.put("/api/auth/profile")
+def update_profile(payload: ProfileUpdateRequest, user: dict = Depends(get_current_user)) -> dict:
+    if payload.password:
+        if not payload.current_password:
+            raise HTTPException(status_code=400, detail="Current password is required to set a new password")
+        if not _verify_password(payload.current_password, user["password_hash"]):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+    pw_hash = _hash_password(payload.password) if payload.password else None
+    updated = update_user(user["id"], display_name=payload.display_name, password_hash=pw_hash)
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return updated
+
+
+# ── Admin credential management ─────────────────────────────────────────
+
+class CredentialRequest(BaseModel):
+    provider: str = Field(..., pattern=r"^(jira|ado)$")
+    label: str | None = None
+    # Jira fields
+    email: str | None = None
+    password: str | None = None
+    jira_url: str | None = None
+    # Azure DevOps fields
+    pat: str | None = None
+    ado_org: str | None = None
+
+
+@app.get("/api/admin/users/{user_id}/credentials")
+def admin_list_user_credentials(user_id: int, admin: dict = Depends(require_admin)) -> dict:
+    target = fetch_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    creds = fetch_credentials_by_user(user_id)
+    return {"credentials": creds}
+
+
+@app.put("/api/admin/users/{user_id}/credentials/{provider}")
+def admin_save_user_credential(user_id: int, provider: str, body: CredentialRequest, admin: dict = Depends(require_admin)) -> dict:
+    if provider not in ("jira", "ado"):
+        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    target = fetch_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    import json as _json
+    if provider == "jira":
+        if not body.email or not body.password:
+            raise HTTPException(status_code=400, detail="Jira requires email and password")
+        secret_payload = _json.dumps({"email": body.email, "password": body.password, "jira_url": body.jira_url or ""})
+    else:
+        if not body.pat:
+            raise HTTPException(status_code=400, detail="Azure DevOps requires a PAT")
+        secret_payload = _json.dumps({"pat": body.pat, "ado_org": body.ado_org or ""})
+
+    encrypted = _fernet.encrypt(secret_payload.encode()).decode()
+    result = upsert_credential(user_id, provider, encrypted, body.label)
+    return {"credential": result}
+
+
+@app.delete("/api/admin/users/{user_id}/credentials/{provider}")
+def admin_delete_user_credential(user_id: int, provider: str, admin: dict = Depends(require_admin)) -> dict:
+    if provider not in ("jira", "ado"):
+        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    deleted = delete_credential(user_id, provider)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    return {"status": "deleted", "provider": provider}
+
+
+# ── Kanban endpoints ────────────────────────────────────────────────────
+
+class KanbanColumnRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    color: str = "#3b82f6"
+
+class KanbanRowRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    color: str = "#6b7280"
+
+class KanbanCardRequest(BaseModel):
+    column_id: int
+    row_id: int | None = None
+    title: str = Field(..., min_length=1, max_length=500)
+    color: str = "#1f6688"
+    issue_key: str | None = None
+    ticket_source: str | None = Field(None, pattern="^(jira|ado)$")
+    description: str | None = None
+
+class KanbanCardMoveRequest(BaseModel):
+    column_id: int | None = None
+    row_id: int | None = None
+    title: str | None = None
+    color: str | None = None
+
+
+@app.get("/api/kanban/{board_id}")
+def get_kanban_board(board_id: int) -> dict:
+    board = fetch_board_by_id(board_id)
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+    if board.get("board_type") != "kanban":
+        raise HTTPException(status_code=400, detail="Not a kanban board")
+    return {
+        "board": board,
+        "columns": fetch_kanban_columns(board_id),
+        "rows": fetch_kanban_rows(board_id),
+        "cards": fetch_kanban_cards(board_id),
+    }
+
+
+@app.post("/api/kanban/{board_id}/columns", status_code=201)
+def create_kanban_column(board_id: int, payload: KanbanColumnRequest) -> dict:
+    board = fetch_board_by_id(board_id)
+    if not board or board.get("board_type") != "kanban":
+        raise HTTPException(status_code=404, detail="Kanban board not found")
+    col = insert_kanban_column(board_id, payload.name.strip(), payload.color)
+    log_activity(board_id, "Added column", payload.name.strip())
+    return col
+
+
+@app.put("/api/kanban/columns/{col_id}")
+def edit_kanban_column(col_id: int, payload: KanbanColumnRequest) -> dict:
+    col = update_kanban_column(col_id, payload.name.strip(), payload.color)
+    if not col:
+        raise HTTPException(status_code=404, detail="Column not found")
+    return col
+
+
+@app.delete("/api/kanban/columns/{col_id}")
+def remove_kanban_column(col_id: int) -> dict:
+    if not delete_kanban_column(col_id):
+        raise HTTPException(status_code=404, detail="Column not found")
+    return {"status": "deleted"}
+
+
+@app.post("/api/kanban/{board_id}/rows", status_code=201)
+def create_kanban_row(board_id: int, payload: KanbanRowRequest) -> dict:
+    board = fetch_board_by_id(board_id)
+    if not board or board.get("board_type") != "kanban":
+        raise HTTPException(status_code=404, detail="Kanban board not found")
+    row = insert_kanban_row(board_id, payload.name.strip(), payload.color)
+    log_activity(board_id, "Added row", payload.name.strip())
+    return row
+
+
+@app.put("/api/kanban/rows/{row_id}")
+def edit_kanban_row(row_id: int, payload: KanbanRowRequest) -> dict:
+    row = update_kanban_row(row_id, payload.name.strip(), payload.color)
+    if not row:
+        raise HTTPException(status_code=404, detail="Row not found")
+    return row
+
+
+@app.delete("/api/kanban/rows/{row_id}")
+def remove_kanban_row(row_id: int) -> dict:
+    if not delete_kanban_row(row_id):
+        raise HTTPException(status_code=404, detail="Row not found")
+    return {"status": "deleted"}
+
+
+@app.post("/api/kanban/{board_id}/cards", status_code=201)
+def create_kanban_card(board_id: int, payload: KanbanCardRequest) -> dict:
+    board = fetch_board_by_id(board_id)
+    if not board or board.get("board_type") != "kanban":
+        raise HTTPException(status_code=404, detail="Kanban board not found")
+    card = insert_kanban_card(
+        board_id, payload.column_id, payload.row_id,
+        payload.title.strip(), payload.color,
+        issue_key=payload.issue_key.strip() if payload.issue_key else None,
+        ticket_source=payload.ticket_source,
+        description=payload.description,
+    )
+    log_activity(board_id, "Added card", payload.title.strip()[:50])
+    return card
+
+
+@app.put("/api/kanban/cards/{card_id}")
+def edit_kanban_card(card_id: int, payload: KanbanCardMoveRequest) -> dict:
+    card = update_kanban_card(card_id, title=payload.title, column_id=payload.column_id, row_id=payload.row_id, color=payload.color)
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+    return card
+
+
+@app.delete("/api/kanban/cards/{card_id}")
+def remove_kanban_card(card_id: int) -> dict:
+    if not delete_kanban_card(card_id):
+        raise HTTPException(status_code=404, detail="Card not found")
+    return {"status": "deleted"}
+
+
+@app.get("/api/kanban/ticket-lookup")
+def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Query(..., pattern="^(jira|ado)$"), user: dict = Depends(get_current_user)) -> dict:
+    """Fetch ticket info from JIRA or ADO by exact key. No ticket creation."""
+    try:
+        if source == "jira":
+            ticket = fetch_jira_issue(key.strip(), user["id"])
+        else:
+            ticket = fetch_ado_work_item(key.strip(), user["id"])
+        return {
+            "issue_key": ticket["issue_key"],
+            "summary": ticket["summary"],
+            "issue_type": ticket.get("issue_type"),
+            "status": ticket.get("status"),
+            "assignee": ticket.get("assignee"),
+            "source": source,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Ticket not found: {e}")
+
+
+@app.get("/api/admin/users")
+def admin_list_users(admin: dict = Depends(require_admin)) -> list[dict]:
+    users = fetch_users_with_board_count()
+    # Enrich each user with their configured integration providers
+    for u in users:
+        creds = fetch_credentials_by_user(u["id"])
+        u["integrations"] = [c["provider"] for c in creds]
+    return users
+
+
+class AdminCreateUserRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    display_name: str = Field(..., min_length=1, max_length=100)
+    password: str = Field(..., min_length=4)
+    role: str = Field("user", pattern=r"^(user|admin)$")
+
+
+class AdminUpdateUserRequest(BaseModel):
+    display_name: str | None = None
+    role: str | None = Field(None, pattern=r"^(user|admin)$")
+    password: str | None = Field(None, min_length=4)
+
+
+@app.post("/api/admin/users", status_code=201)
+def admin_create_user(payload: AdminCreateUserRequest, admin: dict = Depends(require_admin)) -> dict:
+    existing = fetch_user_by_username(payload.username)
+    if existing:
+        raise HTTPException(status_code=409, detail="Username already taken")
+    pw_hash = _hash_password(payload.password)
+    user = create_user(payload.username, payload.display_name, pw_hash, payload.role)
+    return user
+
+
+@app.put("/api/admin/users/{user_id}")
+def admin_update_user(user_id: int, payload: AdminUpdateUserRequest, admin: dict = Depends(require_admin)) -> dict:
+    pw_hash = _hash_password(payload.password) if payload.password else None
+    updated = update_user(
+        user_id,
+        display_name=payload.display_name,
+        role=payload.role,
+        password_hash=pw_hash,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return updated
+
+
+@app.get("/api/admin/users/{user_id}/boards")
+def admin_user_boards(user_id: int, admin: dict = Depends(require_admin)) -> list[dict]:
+    return fetch_boards_by_user(user_id)
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: int, admin: dict = Depends(require_admin)) -> dict:
+    if user_id == admin["id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete yourself")
+    deleted = delete_user(user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"status": "deleted", "user_id": user_id}
+
+
+class AssignBoardRequest(BaseModel):
+    user_id: int
+
+
+@app.patch("/api/admin/boards/{board_id}/assign")
+def admin_assign_board(board_id: int, payload: AssignBoardRequest, admin: dict = Depends(require_admin)) -> dict:
+    board = fetch_board_by_id(board_id)
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+    target_user = fetch_user_by_id(payload.user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    updated = assign_board_owner(board_id, payload.user_id)
+    return updated
 
 
 @app.get("/health")
@@ -1281,8 +1945,9 @@ def remove_item(item_id: int) -> dict:
 class CreateBoardRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
-    start_date: date
-    end_date: date
+    start_date: date | None = None
+    end_date: date | None = None
+    board_type: str = Field(default="pi_planning", pattern=r"^(pi_planning|kanban)$")
 
 
 class UpdateBoardRequest(BaseModel):
@@ -1299,14 +1964,19 @@ def list_boards(include_archived: bool = Query(False)) -> dict:
 
 
 @app.post("/api/boards", status_code=201)
-def create_board_endpoint(payload: CreateBoardRequest) -> dict:
-    if payload.end_date < payload.start_date:
-        raise HTTPException(status_code=400, detail="End date must be on or after start date")
+def create_board_endpoint(payload: CreateBoardRequest, user: dict = Depends(get_current_user)) -> dict:
+    if payload.board_type == "pi_planning":
+        if not payload.start_date or not payload.end_date:
+            raise HTTPException(status_code=400, detail="Start and end dates are required for PI Planning boards")
+        if payload.end_date < payload.start_date:
+            raise HTTPException(status_code=400, detail="End date must be on or after start date")
     board = insert_board(
         name=payload.name.strip(),
         description=(payload.description or "").strip() or None,
-        start_date=payload.start_date.isoformat(),
-        end_date=payload.end_date.isoformat(),
+        start_date=payload.start_date.isoformat() if payload.start_date else None,
+        end_date=payload.end_date.isoformat() if payload.end_date else None,
+        created_by=user["id"],
+        board_type=payload.board_type,
     )
     return board
 
@@ -1320,27 +1990,38 @@ def get_board_endpoint(board_id: int) -> dict:
 
 
 @app.put("/api/boards/{board_id}")
-def update_board_endpoint(board_id: int, payload: UpdateBoardRequest) -> dict:
+def update_board_endpoint(board_id: int, payload: UpdateBoardRequest, user: dict = Depends(get_current_user)) -> dict:
+    existing = fetch_board_by_id(board_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Board not found")
+    if user["role"] != "admin" and existing.get("created_by") != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the board creator or an admin can edit this board")
     board = update_board(
         board_id=board_id,
         name=payload.name.strip(),
         description=(payload.description or "").strip() or None,
     )
-    if not board:
-        raise HTTPException(status_code=404, detail="Board not found")
     return board
 
 
 @app.patch("/api/boards/{board_id}/archive")
-def archive_board_endpoint(board_id: int) -> dict:
-    board = archive_board(board_id)
-    if not board:
+def archive_board_endpoint(board_id: int, user: dict = Depends(get_current_user)) -> dict:
+    existing = fetch_board_by_id(board_id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Board not found")
+    if user["role"] != "admin" and existing.get("created_by") != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the board creator or an admin can archive this board")
+    board = archive_board(board_id)
     return board
 
 
 @app.delete("/api/boards/{board_id}")
-def delete_board_endpoint(board_id: int) -> dict:
+def delete_board_endpoint(board_id: int, user: dict = Depends(get_current_user)) -> dict:
+    existing = fetch_board_by_id(board_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Board not found")
+    if user["role"] != "admin" and existing.get("created_by") != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the board creator or an admin can delete this board")
     deleted = delete_board_record(board_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Board not found")
@@ -1357,7 +2038,7 @@ def get_board_activity(board_id: int, limit: int = Query(50, ge=1, le=200)) -> d
 
 
 @app.post("/api/boards/{board_id}/clone")
-def clone_board_endpoint(board_id: int) -> dict:
+def clone_board_endpoint(board_id: int, user: dict = Depends(get_current_user)) -> dict:
     src = fetch_board_by_id(board_id)
     if not src:
         raise HTTPException(status_code=404, detail="Board not found")
@@ -1366,5 +2047,101 @@ def clone_board_endpoint(board_id: int) -> dict:
         description=src.get("description"),
         start_date=src.get("start_date"),
         end_date=src.get("end_date"),
+        created_by=user["id"],
     )
     return {"board": dict(new_board)}
+
+
+# ── Credential management endpoints ─────────────────────────────────────
+
+@app.get("/api/credentials")
+def list_credentials(user: dict = Depends(get_current_user)) -> dict:
+    creds = fetch_credentials_by_user(user["id"])
+    return {"credentials": creds}
+
+
+@app.put("/api/credentials/{provider}")
+def save_credential(provider: str, body: CredentialRequest, user: dict = Depends(get_current_user)) -> dict:
+    if provider not in ("jira", "ado"):
+        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    if body.provider != provider:
+        raise HTTPException(status_code=400, detail="Provider in URL and body must match")
+
+    import json as _json
+    if provider == "jira":
+        if not body.email or not body.password:
+            raise HTTPException(status_code=400, detail="Jira requires email and password")
+        secret_payload = _json.dumps({
+            "email": body.email,
+            "password": body.password,
+            "jira_url": body.jira_url or "",
+        })
+    else:
+        if not body.pat:
+            raise HTTPException(status_code=400, detail="Azure DevOps requires a PAT")
+        secret_payload = _json.dumps({
+            "pat": body.pat,
+            "ado_org": body.ado_org or "",
+        })
+
+    encrypted = _fernet.encrypt(secret_payload.encode()).decode()
+    result = upsert_credential(user["id"], provider, encrypted, body.label)
+    return {"credential": result}
+
+
+@app.delete("/api/credentials/{provider}")
+def remove_credential(provider: str, user: dict = Depends(get_current_user)) -> dict:
+    if provider not in ("jira", "ado"):
+        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    deleted = delete_credential(user["id"], provider)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    return {"status": "deleted", "provider": provider}
+
+
+@app.post("/api/credentials/{provider}/test")
+def test_credential(provider: str, body: CredentialRequest, user: dict = Depends(get_current_user)) -> dict:
+    if provider not in ("jira", "ado"):
+        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+
+    if provider == "jira":
+        if not body.email or not body.password:
+            raise HTTPException(status_code=400, detail="Jira requires email and password")
+        jira_url = (body.jira_url or os.getenv("JIRA_URL", "")).rstrip("/")
+        if not jira_url:
+            raise HTTPException(status_code=400, detail="Jira URL is required")
+        try:
+            resp = requests.get(
+                f"{jira_url}/rest/api/2/myself",
+                auth=(body.email, body.password),
+                verify=_jira_ssl_verify(),
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"status": "success", "message": f"Connected as {data.get('displayName', data.get('emailAddress', 'OK'))}"}
+            else:
+                return {"status": "failed", "message": f"Jira returned HTTP {resp.status_code}"}
+        except requests.RequestException as exc:
+            return {"status": "failed", "message": str(exc)}
+
+    else:  # ado
+        if not body.pat:
+            raise HTTPException(status_code=400, detail="Azure DevOps requires a PAT")
+        ado_org = body.ado_org or os.getenv("ADO_ORG", "")
+        if not ado_org:
+            raise HTTPException(status_code=400, detail="Azure DevOps organization is required")
+        try:
+            resp = requests.get(
+                f"https://dev.azure.com/{ado_org}/_apis/projects?api-version=7.0",
+                auth=("", body.pat),
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                count = data.get("count", len(data.get("value", [])))
+                return {"status": "success", "message": f"Connected — {count} project(s) found"}
+            else:
+                return {"status": "failed", "message": f"Azure DevOps returned HTTP {resp.status_code}"}
+        except requests.RequestException as exc:
+            return {"status": "failed", "message": str(exc)}
