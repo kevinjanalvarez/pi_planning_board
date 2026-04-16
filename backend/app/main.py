@@ -50,6 +50,8 @@ from app.db import (
     fetch_all_users,
     delete_user,
     update_user,
+    update_user_status,
+    fetch_pending_user_count,
     fetch_users_with_board_count,
     fetch_boards_by_user,
     # ── kanban ──
@@ -1619,6 +1621,9 @@ def auth_login(payload: LoginRequest) -> dict:
     user = fetch_user_by_username(payload.username)
     if not user or not _verify_password(payload.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    status = user.get("status", "approved")
+    if status == "pending":
+        raise HTTPException(status_code=403, detail="Your account is pending admin approval.")
     token = _create_token(user["id"], user["username"], user["role"])
     return {
         "token": token,
@@ -1635,6 +1640,9 @@ def auth_login(payload: LoginRequest) -> dict:
 def auth_register(payload: RegisterRequest) -> dict:
     existing = fetch_user_by_username(payload.username)
     if existing:
+        status = existing.get("status", "approved")
+        if status == "pending":
+            raise HTTPException(status_code=409, detail="You already have a pending registration request. Please wait for admin approval.")
         raise HTTPException(status_code=409, detail="Username already taken")
     hashed = _hash_password(payload.password)
     user = create_user(
@@ -1642,16 +1650,11 @@ def auth_register(payload: RegisterRequest) -> dict:
         display_name=payload.display_name,
         password_hash=hashed,
         role="user",
+        status="pending",
     )
-    token = _create_token(user["id"], user["username"], user["role"])
     return {
-        "token": token,
-        "user": {
-            "id": user["id"],
-            "username": user["username"],
-            "display_name": user["display_name"],
-            "role": user["role"],
-        },
+        "pending": True,
+        "message": "Your account has been created and is pending admin approval.",
     }
 
 
@@ -1945,6 +1948,33 @@ def admin_delete_user(user_id: int, admin: dict = Depends(require_admin)) -> dic
     return {"status": "deleted", "user_id": user_id}
 
 
+@app.patch("/api/admin/users/{user_id}/approve")
+def admin_approve_user(user_id: int, admin: dict = Depends(require_admin)) -> dict:
+    user = fetch_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.get("status") != "pending":
+        raise HTTPException(status_code=400, detail="User is not in pending status")
+    update_user_status(user_id, "approved")
+    return {"status": "approved", "user_id": user_id}
+
+
+@app.patch("/api/admin/users/{user_id}/reject")
+def admin_reject_user(user_id: int, admin: dict = Depends(require_admin)) -> dict:
+    user = fetch_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.get("status") != "pending":
+        raise HTTPException(status_code=400, detail="User is not in pending status")
+    delete_user(user_id)
+    return {"status": "rejected", "user_id": user_id}
+
+
+@app.get("/api/admin/pending-count")
+def admin_pending_count(admin: dict = Depends(require_admin)) -> dict:
+    return {"count": fetch_pending_user_count()}
+
+
 class AssignBoardRequest(BaseModel):
     user_id: int
 
@@ -2101,7 +2131,40 @@ def clone_board_endpoint(board_id: int, user: dict = Depends(get_current_user)) 
 @app.get("/api/credentials")
 def list_credentials(user: dict = Depends(get_current_user)) -> dict:
     creds = fetch_credentials_by_user(user["id"])
-    return {"credentials": creds}
+    safe = [{k: v for k, v in c.items() if k != "encrypted_data"} for c in creds]
+    return {"credentials": safe}
+
+
+@app.get("/api/credentials/{provider}/details")
+def get_credential_details(provider: str, user: dict = Depends(get_current_user)) -> dict:
+    """Return decrypted credential fields for editing (passwords/PATs masked)."""
+    if provider not in ("jira", "ado"):
+        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    cred = fetch_credential(user["id"], provider)
+    if not cred:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    import json as _json
+    try:
+        decrypted = _json.loads(_fernet.decrypt(cred["encrypted_data"].encode()).decode())
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not decrypt credential")
+    if provider == "jira":
+        pw = decrypted.get("password", "")
+        return {
+            "provider": "jira",
+            "label": cred.get("label", ""),
+            "email": decrypted.get("email", ""),
+            "jira_url": decrypted.get("jira_url", ""),
+            "password_masked": ("•" * max(0, len(pw) - 4)) + pw[-4:] if len(pw) > 4 else "•" * len(pw),
+        }
+    else:
+        pat = decrypted.get("pat", "")
+        return {
+            "provider": "ado",
+            "label": cred.get("label", ""),
+            "ado_org": decrypted.get("ado_org", ""),
+            "pat_masked": ("•" * max(0, len(pat) - 4)) + pat[-4:] if len(pat) > 4 else "•" * len(pat),
+        }
 
 
 @app.put("/api/credentials/{provider}")
@@ -2141,6 +2204,55 @@ def remove_credential(provider: str, user: dict = Depends(get_current_user)) -> 
     if not deleted:
         raise HTTPException(status_code=404, detail="Credential not found")
     return {"status": "deleted", "provider": provider}
+
+
+@app.get("/api/credentials/health")
+def credentials_health(user: dict = Depends(get_current_user)) -> dict:
+    """Test all stored credentials for the current user (non-blocking health check)."""
+    import json as _json
+    creds = fetch_credentials_by_user(user["id"])
+    results = {}
+    for cred in creds:
+        provider = cred["provider"]
+        try:
+            decrypted = _json.loads(_fernet.decrypt(cred["encrypted_data"].encode()).decode())
+        except Exception:
+            results[provider] = {"status": "failed", "message": "Could not decrypt credentials"}
+            continue
+        try:
+            if provider == "jira":
+                jira_url = (decrypted.get("jira_url") or os.getenv("JIRA_URL", "")).rstrip("/")
+                if not jira_url:
+                    results[provider] = {"status": "failed", "message": "No Jira URL configured"}
+                    continue
+                resp = requests.get(
+                    f"{jira_url}/rest/api/2/myself",
+                    auth=(decrypted.get("email", ""), decrypted.get("password", "")),
+                    verify=_jira_ssl_verify(),
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    results[provider] = {"status": "success", "message": f"Connected as {data.get('displayName', 'OK')}"}
+                else:
+                    results[provider] = {"status": "failed", "message": f"HTTP {resp.status_code}"}
+            elif provider == "ado":
+                ado_org = decrypted.get("ado_org") or os.getenv("ADO_ORG", "")
+                if not ado_org:
+                    results[provider] = {"status": "failed", "message": "No ADO organization configured"}
+                    continue
+                resp = requests.get(
+                    f"https://dev.azure.com/{ado_org}/_apis/projects?api-version=7.0",
+                    auth=("", decrypted.get("pat", "")),
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    results[provider] = {"status": "success", "message": "Connected"}
+                else:
+                    results[provider] = {"status": "failed", "message": f"HTTP {resp.status_code}"}
+        except requests.RequestException as exc:
+            results[provider] = {"status": "failed", "message": str(exc)[:120]}
+    return {"results": results}
 
 
 @app.post("/api/credentials/{provider}/test")

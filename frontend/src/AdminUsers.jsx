@@ -17,12 +17,26 @@ const inputStyle = {
   boxSizing: "border-box", outline: "none", color: "#111827",
 };
 
+const JiraIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+    <path d="M12.005 2C6.486 2 2.005 6.481 2.005 12s4.481 10 10 10 10-4.481 10-10-4.481-10-10-10z" fill="#2684FF"/>
+    <path d="M11.29 8.35l-1.29 1.29-1.29-1.29a1 1 0 00-1.41 1.41L8.58 11l-1.29 1.29a1 1 0 001.41 1.41l1.29-1.29 1.29 1.29a1 1 0 001.41-1.41L11.41 11l1.29-1.29a1 1 0 00-1.41-1.41z" fill="none"/>
+    <path d="M15.53 8h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47V8.47a.47.47 0 00-.47-.47z" fill="#fff"/>
+    <path d="M11.53 12h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47v-3.06a.47.47 0 00-.47-.47z" fill="#fff" opacity=".7"/>
+  </svg>
+);
+const AdoIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+    <path d="M2 17.25V6.75L10 2l8 4.75v4.3L10 14.5l-4-.04v3.8L2 17.25zM22 6.75v10.5L18 22l-6-4v-3l6 3.5v-6.5l-6-4V5l10 1.75z" fill="#0078D7"/>
+  </svg>
+);
+
 const PROVIDERS = [
-  { key: "jira", label: "Jira", icon: "🟦" },
-  { key: "ado", label: "Azure DevOps", icon: "🟧" },
+  { key: "jira", label: "Jira", icon: <JiraIcon /> },
+  { key: "ado", label: "Azure DevOps", icon: <AdoIcon /> },
 ];
 
-export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, onProfile, onIntegrations, onManageUsers }) {
+export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, onProfile, onIntegrations, onManageUsers, pendingCount, onPendingCountChange, integrationWarnings }) {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -58,6 +72,27 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
   }
 
   useEffect(() => { fetchUsers(); }, []);
+
+  const pendingUsers = users.filter((u) => u.status === "pending");
+  const approvedUsers = users.filter((u) => u.status !== "pending");
+
+  async function handleApprove(userId) {
+    try {
+      const res = await apiFetch(`${API_BASE}/api/admin/users/${userId}/approve`, { method: "PATCH" });
+      if (!res.ok) { const d = await res.json(); setError(d.detail || "Failed to approve"); return; }
+      fetchUsers();
+      if (onPendingCountChange) onPendingCountChange();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function handleReject(userId) {
+    try {
+      const res = await apiFetch(`${API_BASE}/api/admin/users/${userId}/reject`, { method: "PATCH" });
+      if (!res.ok) { const d = await res.json(); setError(d.detail || "Failed to reject"); return; }
+      fetchUsers();
+      if (onPendingCountChange) onPendingCountChange();
+    } catch (err) { setError(err.message); }
+  }
 
   async function toggleUserBoards(userId) {
     if (expandedUserId === userId) {
@@ -276,6 +311,18 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
               }}
             >+ Add User</button>
             <div style={{ borderLeft: "1px solid #e5e7eb", height: 24, margin: "0 4px" }} />
+            {pendingCount > 0 && (
+              <span style={{
+                display: "inline-flex", alignItems: "center", gap: 4,
+                background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6,
+                padding: "3px 10px", fontSize: 11, fontWeight: 700, color: "#dc2626",
+              }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                </svg>
+                {pendingCount} pending
+              </span>
+            )}
             <div style={{ position: "relative" }}>
               <button onClick={() => setAvatarMenuOpen((v) => !v)} style={{
                 width: 34, height: 34, borderRadius: "50%", border: "2px solid #93c5fd",
@@ -319,6 +366,14 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
                           onMouseEnter={(e) => e.currentTarget.style.background = "#f3f4f6"} onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                           Integrations
+                          {integrationWarnings && (
+                            <span style={{
+                              marginLeft: "auto", minWidth: 18, height: 18, borderRadius: 9,
+                              background: "#f59e0b", color: "#fff", fontSize: 10, fontWeight: 700,
+                              display: "inline-flex", alignItems: "center", justifyContent: "center",
+                              padding: "0 5px", lineHeight: 1,
+                            }}>!</span>
+                          )}
                         </button>
                       )}
                       {onManageUsers && (
@@ -326,6 +381,14 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
                           onMouseEnter={(e) => e.currentTarget.style.background = "#dbeafe"} onMouseLeave={(e) => e.currentTarget.style.background = "#eff6ff"}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                           Manage Users
+                          {pendingCount > 0 && (
+                            <span style={{
+                              marginLeft: "auto", minWidth: 18, height: 18, borderRadius: 9,
+                              background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 700,
+                              display: "inline-flex", alignItems: "center", justifyContent: "center",
+                              padding: "0 5px", lineHeight: 1,
+                            }}>{pendingCount}</span>
+                          )}
                         </button>
                       )}
                     </div>
@@ -359,6 +422,68 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
       {loading ? (
         <p style={{ color: "#9ca3af", fontSize: 14 }}>Loading users...</p>
       ) : (
+        <>
+        {/* ── Pending Requests Section ── */}
+        {pendingUsers.length > 0 && (
+          <div style={{
+            background: "#fffbeb", borderRadius: 12, border: "1px solid #fde68a",
+            marginBottom: 20, overflow: "hidden",
+          }}>
+            <div style={{
+              padding: "12px 16px", borderBottom: "1px solid #fde68a",
+              display: "flex", alignItems: "center", gap: 8,
+              background: "#fef3c7",
+            }}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#92400e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+              </svg>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "#92400e" }}>
+                Pending Registration Requests ({pendingUsers.length})
+              </span>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+              <thead>
+                <tr style={{ background: "#fef9e7", borderBottom: "1px solid #fde68a" }}>
+                  <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#92400e", fontSize: 12, textTransform: "uppercase", letterSpacing: "0.5px" }}>Username</th>
+                  <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#92400e", fontSize: 12, textTransform: "uppercase", letterSpacing: "0.5px" }}>Display Name</th>
+                  <th style={{ padding: "10px 16px", textAlign: "left", fontWeight: 600, color: "#92400e", fontSize: 12, textTransform: "uppercase", letterSpacing: "0.5px" }}>Requested</th>
+                  <th style={{ padding: "10px 16px", textAlign: "right", fontWeight: 600, color: "#92400e", fontSize: 12, textTransform: "uppercase", letterSpacing: "0.5px" }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingUsers.map((user) => (
+                  <tr key={user.id} style={{ borderBottom: "1px solid #fde68a" }}>
+                    <td style={{ padding: "10px 16px", fontWeight: 600, color: "#111827" }}>{user.username}</td>
+                    <td style={{ padding: "10px 16px", color: "#374151" }}>{user.display_name}</td>
+                    <td style={{ padding: "10px 16px", color: "#6b7280", fontSize: 12 }}>
+                      {user.created_at ? new Date(user.created_at).toLocaleDateString() : "—"}
+                    </td>
+                    <td style={{ padding: "10px 16px", textAlign: "right" }}>
+                      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                        <button
+                          onClick={() => handleApprove(user.id)}
+                          style={{
+                            background: "#15803d", color: "#fff", border: "none", borderRadius: 6,
+                            padding: "5px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700,
+                          }}
+                        >Approve</button>
+                        <button
+                          onClick={() => handleReject(user.id)}
+                          style={{
+                            background: "#dc2626", color: "#fff", border: "none", borderRadius: 6,
+                            padding: "5px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700,
+                          }}
+                        >Reject</button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* ── Approved Users Table ── */}
         <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e5e7eb", overflow: "hidden", boxShadow: "0 1px 3px rgba(0,0,0,0.06)" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
@@ -374,7 +499,7 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
               </tr>
             </thead>
             <tbody>
-              {users.map((user) => {
+              {approvedUsers.map((user) => {
                 const isExpanded = expandedUserId === user.id;
                 const boards = userBoards[user.id];
                 const isSelf = currentUser?.id === user.id;
@@ -496,6 +621,7 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
             </tbody>
           </table>
         </div>
+        </>
       )}
       </div>
 

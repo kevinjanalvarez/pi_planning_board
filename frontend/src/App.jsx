@@ -415,6 +415,9 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [logoutNotice, setLogoutNotice] = useState(false);
+  const [pendingNotice, setPendingNotice] = useState("");
+  const [pendingCount, setPendingCount] = useState(0);
+  const [integrationWarnings, setIntegrationWarnings] = useState(null); // { jira?: {status,message}, ado?: {status,message} }
 
   // ── App state (must be declared before any early return to satisfy Rules of Hooks) ──
   const [view, setView] = useState("dashboard");
@@ -505,10 +508,30 @@ export default function App() {
     [auth?.token],
   );
 
+  // ── Background integration health check ──
+  useEffect(() => {
+    if (!auth?.token) { setIntegrationWarnings(null); return; }
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/credentials/health`, {
+          headers: { Authorization: `Bearer ${auth.token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const failed = {};
+        for (const [provider, result] of Object.entries(data.results || {})) {
+          if (result.status === "failed") failed[provider] = result;
+        }
+        setIntegrationWarnings(Object.keys(failed).length > 0 ? failed : null);
+      } catch {}
+    })();
+  }, [auth?.token]);
+
   async function handleAuthSubmit(e) {
     e.preventDefault();
     setAuthError("");
     setLogoutNotice(false);
+    setPendingNotice("");
     setAuthLoading(true);
     try {
       const endpoint = authMode === "login" ? "/api/auth/login" : "/api/auth/register";
@@ -522,6 +545,12 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Authentication failed");
+      if (data.pending) {
+        setPendingNotice(data.message || "Your account is pending admin approval.");
+        setAuthForm({ username: "", password: "", display_name: "" });
+        setAuthMode("login");
+        return;
+      }
       const authData = { token: data.token, user: data.user };
       setStoredAuth(authData);
       setAuth(authData);
@@ -534,6 +563,15 @@ export default function App() {
   }
 
   // ── Authenticated app below ──
+
+  async function fetchPendingCount() {
+    if (auth?.user?.role !== "admin") return;
+    try {
+      const res = await apiFetch(`${API_BASE}/api/admin/pending-count`);
+      if (res.ok) { const d = await res.json(); setPendingCount(d.count || 0); }
+    } catch {}
+  }
+  useEffect(() => { fetchPendingCount(); }, [auth?.user?.role]);
 
   async function loadActivity() {
     if (!selectedBoard?.id) return;
@@ -1550,6 +1588,17 @@ export default function App() {
             </div>
           )}
 
+          {pendingNotice && (
+            <div style={{
+              background: "#fffbeb", border: "1px solid #fde68a", color: "#92400e",
+              borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 16,
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#92400e" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              {pendingNotice}
+            </div>
+          )}
+
           <h2 style={{ margin: "0 0 4px", fontSize: 22, color: "#111827", fontWeight: 700 }}>
             TaskWeave
           </h2>
@@ -1647,6 +1696,9 @@ export default function App() {
         onProfile={() => setView("profile")}
         onIntegrations={() => setView("integrations")}
         onManageUsers={() => setView("admin-users")}
+        pendingCount={pendingCount}
+        onPendingCountChange={fetchPendingCount}
+        integrationWarnings={integrationWarnings}
       />
     );
   }
@@ -1663,6 +1715,8 @@ export default function App() {
         onProfile={() => setView("profile")}
         onManageUsers={auth?.user?.role === "admin" ? () => setView("admin-users") : null}
         onIntegrations={() => setView("integrations")}
+        pendingCount={pendingCount}
+        integrationWarnings={integrationWarnings}
         onAuthUpdated={(updatedUser) => {
           const newAuth = { ...auth, user: { ...auth.user, ...updatedUser } };
           setStoredAuth(newAuth);
@@ -1691,6 +1745,8 @@ export default function App() {
         onManageUsers={auth?.user?.role === "admin" ? () => setView("admin-users") : null}
         onProfile={() => setView("profile")}
         onIntegrations={() => setView("integrations")}
+        pendingCount={pendingCount}
+        integrationWarnings={integrationWarnings}
       />
     );
   }
@@ -1705,6 +1761,8 @@ export default function App() {
         onProfile={() => setView("profile")}
         onIntegrations={() => setView("integrations")}
         onManageUsers={auth?.user?.role === "admin" ? () => setView("admin-users") : null}
+        pendingCount={pendingCount}
+        integrationWarnings={integrationWarnings}
         onBack={() => {
           setView("dashboard");
           setSelectedBoard(null);
@@ -1819,6 +1877,26 @@ export default function App() {
               Commit Board
             </button>
             <div style={{ borderLeft: "1px solid #e5e7eb", height: 24, margin: "0 4px" }} />
+            {auth?.user?.role === "admin" && pendingCount > 0 && (
+              <button
+                onClick={() => { setAvatarMenuOpen(false); setView("admin-users"); }}
+                style={{
+                  position: "relative", background: "none", border: "none", cursor: "pointer",
+                  padding: "4px 6px", display: "flex", alignItems: "center",
+                }}
+                title={`${pendingCount} pending registration(s)`}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                </svg>
+                <span style={{
+                  position: "absolute", top: 0, right: 2, minWidth: 16, height: 16,
+                  borderRadius: 8, background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 700,
+                  display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px",
+                  lineHeight: 1,
+                }}>{pendingCount}</span>
+              </button>
+            )}
             <div style={{ position: "relative" }}>
               <button onClick={() => setAvatarMenuOpen((v) => !v)} style={{
                 width: 34, height: 34, borderRadius: "50%", border: "2px solid #93c5fd",
@@ -1859,12 +1937,28 @@ export default function App() {
                         onMouseEnter={(e) => e.currentTarget.style.background = "#f3f4f6"} onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                         Integrations
+                        {integrationWarnings && (
+                          <span style={{
+                            marginLeft: "auto", minWidth: 18, height: 18, borderRadius: 9,
+                            background: "#f59e0b", color: "#fff", fontSize: 10, fontWeight: 700,
+                            display: "inline-flex", alignItems: "center", justifyContent: "center",
+                            padding: "0 5px", lineHeight: 1,
+                          }}>!</span>
+                        )}
                       </button>
                       {auth?.user?.role === "admin" && (
                         <button onClick={() => { setAvatarMenuOpen(false); setView("admin-users"); }} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "9px 16px", border: "none", background: "none", fontSize: 13, color: "#374151", cursor: "pointer", textAlign: "left" }}
                           onMouseEnter={(e) => e.currentTarget.style.background = "#f3f4f6"} onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                           Manage Users
+                          {pendingCount > 0 && (
+                            <span style={{
+                              marginLeft: "auto", minWidth: 18, height: 18, borderRadius: 9,
+                              background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 700,
+                              display: "inline-flex", alignItems: "center", justifyContent: "center",
+                              padding: "0 5px", lineHeight: 1,
+                            }}>{pendingCount}</span>
+                          )}
                         </button>
                       )}
                     </div>

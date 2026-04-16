@@ -197,10 +197,16 @@ def init_db() -> None:
                 display_name TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'user',
+                status TEXT NOT NULL DEFAULT 'approved',
                 created_at TEXT NOT NULL
             )
             """
         )
+
+        # ── status column migration ──
+        user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "status" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'")
 
         # ── board_type migration ──
         if "board_type" not in board_cols:
@@ -256,18 +262,19 @@ def init_db() -> None:
 
 # ── User / Auth helpers ─────────────────────────────────────────────────
 
-def create_user(username: str, display_name: str, password_hash: str, role: str = "user") -> dict[str, Any]:
+def create_user(username: str, display_name: str, password_hash: str, role: str = "user", status: str = "approved") -> dict[str, Any]:
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO users (username, display_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
-            (username, display_name, password_hash, role, now),
+            "INSERT INTO users (username, display_name, password_hash, role, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (username, display_name, password_hash, role, status, now),
         )
         return {
             "id": cur.lastrowid,
             "username": username,
             "display_name": display_name,
             "role": role,
+            "status": status,
             "created_at": now,
         }
 
@@ -284,7 +291,7 @@ def fetch_user_by_id(user_id: int) -> dict[str, Any] | None:
 
 def fetch_all_users() -> list[dict[str, Any]]:
     with get_conn() as conn:
-        return conn.execute("SELECT id, username, display_name, role, created_at FROM users ORDER BY id").fetchall()
+        return conn.execute("SELECT id, username, display_name, role, status, created_at FROM users ORDER BY id").fetchall()
 
 
 def update_user(
@@ -310,6 +317,7 @@ def update_user(
             "username": existing["username"],
             "display_name": new_display,
             "role": new_role,
+            "status": existing["status"],
             "created_at": existing["created_at"],
         }
 
@@ -320,11 +328,23 @@ def delete_user(user_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def update_user_status(user_id: int, status: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute("UPDATE users SET status = ? WHERE id = ?", (status, user_id))
+        return cur.rowcount > 0
+
+
+def fetch_pending_user_count() -> int:
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) AS cnt FROM users WHERE status = 'pending'").fetchone()
+        return row["cnt"] if row else 0
+
+
 def fetch_users_with_board_count() -> list[dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT u.id, u.username, u.display_name, u.role, u.created_at,
+            SELECT u.id, u.username, u.display_name, u.role, u.status, u.created_at,
                    COUNT(b.id) AS board_count
             FROM users u
             LEFT JOIN boards b ON b.created_by = u.id
@@ -1007,7 +1027,7 @@ def upsert_credential(user_id: int, provider: str, encrypted_data: str, label: s
 def fetch_credentials_by_user(user_id: int) -> list[dict[str, Any]]:
     with get_conn() as conn:
         return conn.execute(
-            "SELECT id, user_id, provider, label, created_at, updated_at FROM user_credentials WHERE user_id = ? ORDER BY provider",
+            "SELECT * FROM user_credentials WHERE user_id = ? ORDER BY provider",
             (user_id,),
         ).fetchall()
 

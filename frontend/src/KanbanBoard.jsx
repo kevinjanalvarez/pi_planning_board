@@ -4,7 +4,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || "http://0.0.0.0:8000";
 
 const DEFAULT_COL_COLORS = ["#3b82f6", "#f59e0b", "#10b981", "#8b5cf6", "#ec4899", "#ef4444", "#06b6d4"];
 
-export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, onProfile, onIntegrations, onManageUsers }) {
+export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, onProfile, onIntegrations, onManageUsers, pendingCount, integrationWarnings }) {
   const [columns, setColumns] = useState([]);
   const [cards, setCards] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -239,6 +239,26 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                 padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700,
               }}>+ Column</button>
             <div style={{ borderLeft: "1px solid #e5e7eb", height: 24, margin: "0 4px" }} />
+            {onManageUsers && pendingCount > 0 && (
+              <button
+                onClick={() => { setAvatarMenuOpen(false); onManageUsers(); }}
+                style={{
+                  position: "relative", background: "none", border: "none", cursor: "pointer",
+                  padding: "4px 6px", display: "flex", alignItems: "center",
+                }}
+                title={`${pendingCount} pending registration(s)`}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                </svg>
+                <span style={{
+                  position: "absolute", top: 0, right: 2, minWidth: 16, height: 16,
+                  borderRadius: 8, background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 700,
+                  display: "flex", alignItems: "center", justifyContent: "center", padding: "0 4px",
+                  lineHeight: 1,
+                }}>{pendingCount}</span>
+              </button>
+            )}
             <div style={{ position: "relative" }}>
               <button onClick={() => setAvatarMenuOpen((v) => !v)} style={{
                 width: 34, height: 34, borderRadius: "50%", border: "2px solid #93c5fd",
@@ -282,6 +302,14 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                           onMouseEnter={(e) => e.currentTarget.style.background = "#f3f4f6"} onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                           Integrations
+                          {integrationWarnings && (
+                            <span style={{
+                              marginLeft: "auto", minWidth: 18, height: 18, borderRadius: 9,
+                              background: "#f59e0b", color: "#fff", fontSize: 10, fontWeight: 700,
+                              display: "inline-flex", alignItems: "center", justifyContent: "center",
+                              padding: "0 5px", lineHeight: 1,
+                            }}>!</span>
+                          )}
                         </button>
                       )}
                       {onManageUsers && (
@@ -289,6 +317,14 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                           onMouseEnter={(e) => e.currentTarget.style.background = "#f3f4f6"} onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                           Manage Users
+                          {pendingCount > 0 && (
+                            <span style={{
+                              marginLeft: "auto", minWidth: 18, height: 18, borderRadius: 9,
+                              background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 700,
+                              display: "inline-flex", alignItems: "center", justifyContent: "center",
+                              padding: "0 5px", lineHeight: 1,
+                            }}>{pendingCount}</span>
+                          )}
                         </button>
                       )}
                     </div>

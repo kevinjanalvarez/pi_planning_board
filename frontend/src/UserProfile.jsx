@@ -8,12 +8,25 @@ const inputStyle = {
   boxSizing: "border-box", outline: "none", color: "#111827",
 };
 
+const JiraIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+    <path d="M12.005 2C6.486 2 2.005 6.481 2.005 12s4.481 10 10 10 10-4.481 10-10-4.481-10-10-10z" fill="#2684FF"/>
+    <path d="M15.53 8h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47V8.47a.47.47 0 00-.47-.47z" fill="#fff"/>
+    <path d="M11.53 12h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47v-3.06a.47.47 0 00-.47-.47z" fill="#fff" opacity=".7"/>
+  </svg>
+);
+const AdoIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+    <path d="M2 17.25V6.75L10 2l8 4.75v4.3L10 14.5l-4-.04v3.8L2 17.25zM22 6.75v10.5L18 22l-6-4v-3l6 3.5v-6.5l-6-4V5l10 1.75z" fill="#0078D7"/>
+  </svg>
+);
+
 const PROVIDERS = [
-  { key: "jira", label: "Jira", icon: "🟦" },
-  { key: "ado", label: "Azure DevOps", icon: "🟧" },
+  { key: "jira", label: "Jira", icon: <JiraIcon /> },
+  { key: "ado", label: "Azure DevOps", icon: <AdoIcon /> },
 ];
 
-export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, onProfile, onManageUsers, onIntegrations, onAuthUpdated, initialTab }) {
+export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, onProfile, onManageUsers, onIntegrations, onAuthUpdated, initialTab, pendingCount, integrationWarnings }) {
   const [tab, setTab] = useState(initialTab || "profile"); // "profile" | "integrations"
   const [avatarMenuOpen, setAvatarMenuOpen] = useState(false);
 
@@ -40,6 +53,8 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
   const [testResult, setTestResult] = useState(null);
   const [testing, setTesting] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
+  const [cardTestResult, setCardTestResult] = useState({}); // { jira: { status, message }, ado: ... }
+  const [cardTesting, setCardTesting] = useState({});
 
   // ── Profile handlers ──
   async function handleProfileSave() {
@@ -97,7 +112,7 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
 
   useEffect(() => { if (tab === "integrations") fetchCredentials(); }, [tab]);
 
-  function openCredModal(providerKey) {
+  async function openCredModal(providerKey) {
     const existing = credentials.find((c) => c.provider === providerKey);
     setEditProvider(existing ? providerKey : null);
     setCredForm({
@@ -107,6 +122,24 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
     setCredError("");
     setTestResult(null);
     setShowCredModal(true);
+    // Pre-fill with saved data if editing
+    if (existing) {
+      try {
+        const res = await apiFetch(`${API_BASE}/api/credentials/${providerKey}/details`);
+        if (res.ok) {
+          const d = await res.json();
+          setCredForm((f) => ({
+            ...f,
+            label: d.label || f.label,
+            email: d.email || "",
+            jira_url: d.jira_url || "",
+            ado_org: d.ado_org || "",
+            password: d.password_masked || "",
+            pat: d.pat_masked || "",
+          }));
+        }
+      } catch {}
+    }
   }
 
   async function handleCredSave() {
@@ -149,6 +182,21 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
       setTestResult(await res.json());
     } catch (err) { setTestResult({ status: "failed", message: err.message }); }
     finally { setTesting(false); }
+  }
+
+  async function handleCardTest(providerKey) {
+    setCardTesting((t) => ({ ...t, [providerKey]: true }));
+    setCardTestResult((r) => ({ ...r, [providerKey]: null }));
+    try {
+      const res = await apiFetch(`${API_BASE}/api/credentials/health`);
+      const data = await res.json();
+      const result = data.results?.[providerKey];
+      setCardTestResult((r) => ({ ...r, [providerKey]: result || { status: "failed", message: "No result returned" } }));
+    } catch (err) {
+      setCardTestResult((r) => ({ ...r, [providerKey]: { status: "failed", message: err.message } }));
+    } finally {
+      setCardTesting((t) => ({ ...t, [providerKey]: false }));
+    }
   }
 
   async function handleCredDelete(providerKey) {
@@ -250,6 +298,14 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
                           onMouseEnter={(e) => e.currentTarget.style.background = tab === "integrations" ? "#dbeafe" : "#f3f4f6"} onMouseLeave={(e) => e.currentTarget.style.background = tab === "integrations" ? "#eff6ff" : "none"}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={tab === "integrations" ? "#1d4ed8" : "#6b7280"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                           Integrations
+                          {integrationWarnings && (
+                            <span style={{
+                              marginLeft: "auto", minWidth: 18, height: 18, borderRadius: 9,
+                              background: "#f59e0b", color: "#fff", fontSize: 10, fontWeight: 700,
+                              display: "inline-flex", alignItems: "center", justifyContent: "center",
+                              padding: "0 5px", lineHeight: 1,
+                            }}>!</span>
+                          )}
                         </button>
                       )}
                       {onManageUsers && (
@@ -257,6 +313,14 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
                           onMouseEnter={(e) => e.currentTarget.style.background = "#f3f4f6"} onMouseLeave={(e) => e.currentTarget.style.background = "none"}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
                           Manage Users
+                          {pendingCount > 0 && (
+                            <span style={{
+                              marginLeft: "auto", minWidth: 18, height: 18, borderRadius: 9,
+                              background: "#dc2626", color: "#fff", fontSize: 10, fontWeight: 700,
+                              display: "inline-flex", alignItems: "center", justifyContent: "center",
+                              padding: "0 5px", lineHeight: 1,
+                            }}>{pendingCount}</span>
+                          )}
                         </button>
                       )}
                     </div>
@@ -393,9 +457,9 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
                   return (
                     <div key={prov.key} style={{
                       background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12,
-                      padding: "20px 24px", display: "flex", alignItems: "center",
-                      justifyContent: "space-between", boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
+                      padding: "20px 24px", boxShadow: "0 1px 3px rgba(0,0,0,0.04)",
                     }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                         <span style={{ fontSize: 24 }}>{prov.icon}</span>
                         <div>
@@ -407,7 +471,18 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
                           )}
                         </div>
                       </div>
-                      <div style={{ display: "flex", gap: 8 }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        {cred && (
+                          <button onClick={() => handleCardTest(prov.key)} disabled={cardTesting[prov.key]} style={{
+                            background: "none", border: "1px solid #a5b4fc", borderRadius: 6,
+                            padding: "6px 12px", cursor: cardTesting[prov.key] ? "wait" : "pointer",
+                            fontSize: 12, color: "#4f46e5", fontWeight: 600,
+                            opacity: cardTesting[prov.key] ? 0.7 : 1,
+                          }}
+                            onMouseEnter={(e) => { e.currentTarget.style.background = "#eef2ff"; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+                          >{cardTesting[prov.key] ? "Testing…" : "Test"}</button>
+                        )}
                         <button onClick={() => openCredModal(prov.key)} style={{
                           background: cred ? "none" : "#1d4ed8", color: cred ? "#1d4ed8" : "#fff",
                           border: cred ? "1px solid #93c5fd" : "none", borderRadius: 6,
@@ -426,6 +501,18 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
                           >Remove</button>
                         )}
                       </div>
+                    </div>
+                    {cardTestResult[prov.key] && (
+                      <div style={{
+                        marginTop: 8, padding: "8px 14px", borderRadius: 8, fontSize: 12, fontWeight: 500,
+                        background: cardTestResult[prov.key].status === "success" ? "#f0fdf4" : "#fef2f2",
+                        border: `1px solid ${cardTestResult[prov.key].status === "success" ? "#bbf7d0" : "#fecaca"}`,
+                        color: cardTestResult[prov.key].status === "success" ? "#166534" : "#b91c1c",
+                      }}>
+                        {cardTestResult[prov.key].status === "success" ? "✓ " : "✗ "}
+                        {cardTestResult[prov.key].message}
+                      </div>
+                    )}
                     </div>
                   );
                 })}
