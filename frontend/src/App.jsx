@@ -472,6 +472,8 @@ export default function App() {
   const [showGantt, setShowGantt] = useState(false);
   const [activityLog, setActivityLog] = useState([]);
   const [avatarMenuOpen, setAvatarMenuOpen] = useState(false);
+  const [insightsPanel, setInsightsPanel] = useState(false);       // true/false toggle
+  const [insightsData, setInsightsData] = useState(null);          // { type, data, loading, error }
   const boardWrapRef = useRef(null);
   const ganttRef = useRef(null);
   const resizeStateRef = useRef(null);
@@ -987,6 +989,7 @@ export default function App() {
       x: event.clientX,
       y: event.clientY,
       itemId: item.id,
+      itemType: item.item_type,
       itemLabel: formatIssueKey(item) || item.title || "item",
       issueKey: formatIssueKey(item) || "N/A",
       assignee: item.jira_assignee || "Unassigned",
@@ -1474,6 +1477,33 @@ export default function App() {
     }
   }
 
+  async function fetchMilestoneInsights(milestoneId) {
+    setInsightsPanel(true);
+    setInsightsData({ type: "milestone", data: null, loading: true, error: null });
+    try {
+      const res = await apiFetch(`${API_BASE}/api/milestones/${milestoneId}/insights`, { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "Failed to generate insights");
+      setInsightsData({ type: "milestone", data: body, loading: false, error: null });
+    } catch (err) {
+      setInsightsData({ type: "milestone", data: null, loading: false, error: err.message });
+    }
+  }
+
+  async function fetchBoardInsights() {
+    if (!selectedBoard?.id) return;
+    setInsightsPanel(true);
+    setInsightsData({ type: "board", data: null, loading: true, error: null });
+    try {
+      const res = await apiFetch(`${API_BASE}/api/boards/${selectedBoard.id}/insights`, { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "Failed to generate insights");
+      setInsightsData({ type: "board", data: body, loading: false, error: null });
+    } catch (err) {
+      setInsightsData({ type: "board", data: null, loading: false, error: err.message });
+    }
+  }
+
   async function commitBoard() {
     setError("");
     try {
@@ -1900,6 +1930,28 @@ export default function App() {
               <span className="link-toggle-slider" />
             </label>
             )}
+            <button
+              type="button"
+              onClick={() => {
+                if (insightsPanel) {
+                  setInsightsPanel(false);
+                } else {
+                  fetchBoardInsights();
+                }
+              }}
+              style={{
+                display: "flex", alignItems: "center", gap: 4,
+                padding: "5px 12px", fontSize: 12, fontWeight: 600,
+                background: insightsPanel ? "#eff6ff" : "none",
+                color: insightsPanel ? "#1d4ed8" : "#374151",
+                border: insightsPanel ? "1px solid #bfdbfe" : "1px solid #e5e7eb",
+                borderRadius: 6, cursor: "pointer",
+              }}
+              title={insightsPanel ? "Close AI panel" : "Open AI Insights"}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a4 4 0 0 0-4 4c0 2.8 4 7 4 7s4-4.2 4-7a4 4 0 0 0-4-4z"/><circle cx="12" cy="6" r="1.5"/><path d="M5 20h14"/><path d="M5 17h14"/></svg>
+              AI Insights
+            </button>
             <div style={{ position: "relative", display: "inline-block" }}>
               <button
                 type="button"
@@ -2115,6 +2167,8 @@ export default function App() {
       {loading ? <div className="loading">Loading board...</div> : null}
 
       {!loading ? (
+        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        <div style={{ flex: 1, overflow: "auto" }}>
         <>
           {showGantt ? (
             /* ── Gantt Chart View ── */
@@ -2670,6 +2724,128 @@ export default function App() {
           </div>
           )}
         </>
+        </div>
+        {/* ── AI Insights Docked Panel ── */}
+        {insightsPanel && (
+          <div style={{
+            width: 360, minWidth: 360, borderLeft: "1px solid #e5e7eb",
+            background: "#fff", display: "flex", flexDirection: "column",
+            overflow: "hidden",
+          }}>
+            {/* Panel Header */}
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "12px 16px", borderBottom: "1px solid #f3f4f6", flexShrink: 0,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 16 }}>&#129302;</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>
+                  {insightsData?.type === "board" ? "PI Health" : "Milestone Insights"}
+                </span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <button
+                  type="button"
+                  onClick={fetchBoardInsights}
+                  style={{
+                    background: "none", border: "1px solid #e5e7eb", borderRadius: 4,
+                    fontSize: 11, padding: "2px 8px", cursor: "pointer", color: "#6b7280",
+                  }}
+                  title="Refresh board insights"
+                >↻</button>
+                <button
+                  type="button"
+                  onClick={() => setInsightsPanel(false)}
+                  style={{
+                    background: "none", border: "none", fontSize: 14,
+                    cursor: "pointer", color: "#6b7280", padding: "2px 6px",
+                  }}
+                  title="Close panel"
+                >✕</button>
+              </div>
+            </div>
+
+            {/* Panel Content */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "14px 16px" }}>
+              {insightsData?.loading ? (
+                <div style={{ textAlign: "center", padding: "40px 0", color: "#6b7280" }}>
+                  <div style={{ fontSize: 20, marginBottom: 8 }}>⏳</div>
+                  <div style={{ fontSize: 12 }}>Generating insights...</div>
+                </div>
+              ) : insightsData?.error ? (
+                <div style={{ color: "#dc2626", fontSize: 12, padding: "16px 0" }}>
+                  {insightsData.error}
+                </div>
+              ) : insightsData?.data ? (
+                <div style={{ fontSize: 12, color: "#374151", lineHeight: 1.6 }}>
+                  {insightsData.data.milestone_key ? (
+                    <div style={{
+                      fontSize: 11, color: "#6b7280", marginBottom: 10,
+                      padding: "6px 10px", background: "#f9fafb", borderRadius: 6,
+                    }}>
+                      <strong style={{ color: "#111827" }}>{insightsData.data.milestone_key}</strong> · {insightsData.data.milestone_title}
+                      {insightsData.data.progress ? (
+                        <span style={{ display: "block", marginTop: 3 }}>
+                          {insightsData.data.progress.pct}% done ({insightsData.data.progress.done}/{insightsData.data.progress.total}), {insightsData.data.progress.blocked} blocked
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {insightsData.data.board_name ? (
+                    <div style={{
+                      fontSize: 11, color: "#6b7280", marginBottom: 10,
+                      padding: "6px 10px", background: "#f9fafb", borderRadius: 6,
+                    }}>
+                      <strong style={{ color: "#111827" }}>{insightsData.data.board_name}</strong> · {insightsData.data.milestone_count} milestone(s)
+                    </div>
+                  ) : null}
+
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{
+                      fontWeight: 700, fontSize: 10, color: "#111827", marginBottom: 4,
+                      textTransform: "uppercase", letterSpacing: "0.06em",
+                    }}>Health Summary</div>
+                    <div style={{
+                      background: "#f0fdf4", borderRadius: 6, padding: "8px 10px",
+                      fontSize: 12, borderLeft: "3px solid #15803d", lineHeight: 1.5,
+                    }}>
+                      {insightsData.data.health_summary}
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{
+                      fontWeight: 700, fontSize: 10, color: "#dc2626", marginBottom: 4,
+                      textTransform: "uppercase", letterSpacing: "0.06em",
+                    }}>Risks</div>
+                    <ul style={{ margin: 0, paddingLeft: 14 }}>
+                      {(insightsData.data.risks || []).map((r, i) => (
+                        <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div>
+                    <div style={{
+                      fontWeight: 700, fontSize: 10, color: "#15803d", marginBottom: 4,
+                      textTransform: "uppercase", letterSpacing: "0.06em",
+                    }}>Recommendations</div>
+                    <ul style={{ margin: 0, paddingLeft: 14 }}>
+                      {(insightsData.data.recommendations || []).map((r, i) => (
+                        <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{r}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ textAlign: "center", padding: "40px 0", color: "#9ca3af", fontSize: 12 }}>
+                  Click <strong>AI Insights</strong> in the toolbar or use 🤖 on a milestone to generate insights.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        </div>
       ) : null}
 
       {menu?.type === "milestone" ? (
@@ -3139,6 +3315,20 @@ export default function App() {
               </div>
             </div>
             <div className="item-actions">
+              {itemAction.itemType === "IDEA" ? (
+                <button
+                  type="button"
+                  title="AI Insights"
+                  aria-label="Generate AI insights for this milestone"
+                  onClick={() => {
+                    fetchMilestoneInsights(itemAction.itemId);
+                    setItemAction(null);
+                  }}
+                  style={{ fontSize: 14 }}
+                >
+                  &#129302;
+                </button>
+              ) : null}
               {showLinks ? (
                 <button type="button" onClick={() => beginLinkMode(itemAction.itemId)} title="Link ticket" aria-label="Link ticket">
                   &#128279;

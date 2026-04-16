@@ -42,6 +42,7 @@ PI planning sessions are a cornerstone of the Scaled Agile Framework (SAFe), but
 | **Admin panel** | User CRUD, role assignment, board assignment, credential management per user |
 | **User profile** | Update display name, change password, manage personal JIRA/ADO integrations with connection testing |
 | **Activity log** | Append-only transaction history capturing every board event |
+| **AI Insights (LLM)** | Azure OpenAI-powered health analysis — per-milestone and board-wide. Docked side panel (VS Code chat style) with health summary, risks, and recommendations |
 
 ---
 
@@ -286,6 +287,12 @@ cat ~/hcph_frontend.log
 | GET | `/api/jira/projects/{project_key}/issue-types` | Issue types for project |
 | GET | `/api/jira/field-options` | Custom field options |
 
+### AI Insights
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/milestones/{milestone_id}/insights` | Generate LLM-powered insights for a single milestone |
+| POST | `/api/boards/{board_id}/insights` | Generate LLM-powered health summary for the entire board |
+
 ### Other
 | Method | Path | Description |
 |---|---|---|
@@ -345,3 +352,39 @@ Applied only to IDEA milestones. Evaluated in order — first match wins:
 | 🟢 Green | 100% done, or no red/amber triggers | No badge (clean tile) | Green diamond, green text |
 | 🟡 Amber | >75% timeline with <50% done, or timeline-progress gap >10% | "WARNING" badge (top-right) | Amber diamond + "WARNING" label |
 | 🔴 Red | Overdue, any blocked tasks, or timeline-progress gap >25% | "AT RISK" badge (top-right) | Red diamond + "AT RISK" label |
+
+---
+
+## AI Insights (LLM)
+
+The board includes an AI-powered insights panel that analyzes milestone health and provides actionable recommendations using Azure OpenAI (GPT).
+
+### How It Works
+
+1. **Board-level insights** — click the "AI Insights" button in the toolbar to analyze all milestones across the board
+2. **Milestone-level insights** — click the 🤖 button on any IDEA milestone's action menu for focused analysis
+3. The insights panel docks on the right side of the board (VS Code chat style), pushing the board content left
+4. The panel is toggleable — click "AI Insights" again to hide it
+
+### What It Returns
+
+| Section | Description |
+|---|---|
+| **Health Summary** | Overall assessment of milestone/board health |
+| **Risks** | Identified risks based on task statuses, blocked items, timeline gaps, and progress |
+| **Recommendations** | Actionable suggestions to improve delivery outcomes |
+
+### Environment Variables
+
+Add these to `backend/.env` to enable AI insights:
+
+| Variable | Description | Example |
+|---|---|---|
+| `AOAI_ENDPOINT` | Azure OpenAI endpoint URL | `https://your-resource.cognitiveservices.azure.com/` |
+| `AOAI_API_KEY` | Azure OpenAI API key | (your key) |
+| `AOAI_API_VERSION` | API version | `2024-12-01-preview` |
+| `AOAI_DEPLOYMENT` | Model deployment name | `gpt-4o` |
+| `AOAI_TEMPERATURE` | LLM temperature (0.0–1.0) | `0.1` |
+| `AOAI_MAX_TOKENS` | Max completion tokens | `1000` |
+
+> **Note:** If the Azure OpenAI env vars are not set, the insights endpoints will return `503 Service Unavailable`.

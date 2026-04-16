@@ -7,6 +7,7 @@ from base64 import b64encode
 import bcrypt
 import jwt
 import requests
+from openai import AzureOpenAI
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Depends, Request
@@ -79,6 +80,22 @@ _FERNET_KEY = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
 if not _FERNET_KEY:
     _FERNET_KEY = Fernet.generate_key().decode()
 _fernet = Fernet(_FERNET_KEY.encode() if isinstance(_FERNET_KEY, str) else _FERNET_KEY)
+
+# ── Azure OpenAI config ─────────────────────────────────────────────────
+_AOAI_ENDPOINT = os.getenv("AOAI_ENDPOINT", "")
+_AOAI_KEY = os.getenv("AOAI_API_KEY", "")
+_AOAI_VERSION = os.getenv("AOAI_API_VERSION", "2024-12-01-preview")
+_AOAI_DEPLOYMENT = os.getenv("AOAI_DEPLOYMENT", "gpt-5.1")
+_AOAI_TEMPERATURE = float(os.getenv("AOAI_TEMPERATURE", "0.1"))
+_AOAI_MAX_TOKENS = int(os.getenv("AOAI_MAX_TOKENS", "1000"))
+
+_aoai_client: AzureOpenAI | None = None
+if _AOAI_ENDPOINT and _AOAI_KEY:
+    _aoai_client = AzureOpenAI(
+        azure_endpoint=_AOAI_ENDPOINT,
+        api_key=_AOAI_KEY,
+        api_version=_AOAI_VERSION,
+    )
 
 # ── Auth config ──────────────────────────────────────────────────────────
 JWT_SECRET = os.getenv("JWT_SECRET", "hcph-pi-board-secret-change-me")
@@ -2172,3 +2189,178 @@ def test_credential(provider: str, body: CredentialRequest, user: dict = Depends
                 return {"status": "failed", "message": f"Azure DevOps returned HTTP {resp.status_code}"}
         except requests.RequestException as exc:
             return {"status": "failed", "message": str(exc)}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# LLM Insight Generator
+# ══════════════════════════════════════════════════════════════════════════
+
+def _get_status_tone(status: str) -> str:
+    """Mirror frontend getStatusTone for server-side RAG calculation."""
+    v = (status or "").lower()
+    if not v:
+        return "unknown"
+    if "done" in v or "resolved" in v or "closed" in v:
+        return "done"
+    if "block" in v or "hold" in v:
+        return "blocked"
+    if "dev" in v or "progress" in v or "active" in v or "ongoing" in v:
+        return "in-progress"
+    if "todo" in v or "open" in v or "backlog" in v or "new" in v:
+        return "todo"
+    return "unknown"
+
+
+def _gather_milestone_context(milestone_id: int) -> dict | None:
+    """Gather all data needed for a milestone insight prompt."""
+    item = fetch_item_by_id(milestone_id)
+    if not item or item.get("item_type") != "IDEA":
+        return None
+    board_id = item.get("board_id", 0)
+    board = fetch_board_by_id(board_id)
+    all_items = fetch_items(board_id)
+    all_links = fetch_links(board_id)
+
+    # Find linked task IDs
+    linked_ids = set()
+    for link in all_links:
+        if link["source_item_id"] == milestone_id:
+            linked_ids.add(link["target_item_id"])
+        if link["target_item_id"] == milestone_id:
+            linked_ids.add(link["source_item_id"])
+
+    linked_tasks = [it for it in all_items if it["id"] in linked_ids and it.get("item_type") != "IDEA"]
+    total = len(linked_tasks)
+    done = sum(1 for t in linked_tasks if _get_status_tone(t.get("jira_status")) == "done")
+    blocked = sum(1 for t in linked_tasks if _get_status_tone(t.get("jira_status")) == "blocked")
+    in_progress = sum(1 for t in linked_tasks if _get_status_tone(t.get("jira_status")) == "in-progress")
+    pct = round(done / total * 100) if total else 0
+
+    # Timeline
+    today_str = date.today().isoformat()
+    board_start = board.get("start_date", "") if board else ""
+    board_end = board.get("end_date", "") if board else ""
+    ms_start = item.get("target_date") or board_start
+    ms_end = item.get("end_date") or board_end
+
+    return {
+        "milestone": item,
+        "board": board,
+        "linked_tasks": linked_tasks,
+        "total": total,
+        "done": done,
+        "blocked": blocked,
+        "in_progress": in_progress,
+        "pct": pct,
+        "ms_start": ms_start,
+        "ms_end": ms_end,
+        "today": today_str,
+    }
+
+
+def _build_milestone_prompt(ctx: dict) -> str:
+    ms = ctx["milestone"]
+    tasks_text = ""
+    for t in ctx["linked_tasks"]:
+        tasks_text += f"  - {t.get('issue_key', 'N/A')} \"{t.get('title', '')}\" -- Status: {t.get('jira_status', 'N/A')} -- Assignee: {t.get('jira_assignee', 'Unassigned')}\n"
+    if not tasks_text:
+        tasks_text = "  (no linked tasks)\n"
+
+    return (
+        "You are an agile delivery advisor analyzing a PI Planning milestone.\n\n"
+        f"Milestone: {ms.get('issue_key', 'N/A')} \"{ms.get('title', 'Untitled')}\"\n"
+        f"Timeline: {ctx['ms_start']} to {ctx['ms_end']} (Today: {ctx['today']})\n"
+        f"Progress: {ctx['pct']}% ({ctx['done']}/{ctx['total']} tasks done, {ctx['blocked']} blocked, {ctx['in_progress']} in progress)\n\n"
+        f"Linked Tasks:\n{tasks_text}\n"
+        "Provide a concise analysis in exactly this JSON format (no markdown, no code fences):\n"
+        '{\n'
+        '  "health_summary": "2-3 sentence overall health assessment",\n'
+        '  "risks": ["risk 1", "risk 2", "risk 3"],\n'
+        '  "recommendations": ["recommendation 1", "recommendation 2", "recommendation 3"]\n'
+        '}\n'
+        "Keep each item brief (1 sentence). Focus on actionable insights."
+    )
+
+
+def _build_board_prompt(board: dict, milestones_ctx: list[dict]) -> str:
+    ms_summaries = ""
+    for ctx in milestones_ctx:
+        ms = ctx["milestone"]
+        ms_summaries += f"  - {ms.get('issue_key', 'N/A')} \"{ms.get('title', '')}\" -- {ctx['pct']}% done ({ctx['done']}/{ctx['total']}), {ctx['blocked']} blocked\n"
+    if not ms_summaries:
+        ms_summaries = "  (no milestones)\n"
+
+    return (
+        "You are an agile delivery advisor providing a board-level PI health summary.\n\n"
+        f"Board: \"{board.get('name', 'Untitled')}\"\n"
+        f"Timeline: {board.get('start_date', 'N/A')} to {board.get('end_date', 'N/A')} (Today: {date.today().isoformat()})\n\n"
+        f"Milestones:\n{ms_summaries}\n"
+        "Provide a concise board-level analysis in exactly this JSON format (no markdown, no code fences):\n"
+        '{\n'
+        '  "health_summary": "2-3 sentence overall PI health assessment across all milestones",\n'
+        '  "risks": ["risk 1", "risk 2", "risk 3"],\n'
+        '  "recommendations": ["recommendation 1", "recommendation 2", "recommendation 3"]\n'
+        '}\n'
+        "Keep each item brief (1 sentence). Focus on cross-cutting risks and portfolio-level insights."
+    )
+
+
+def _call_llm(prompt: str) -> dict:
+    """Send prompt to Azure OpenAI and parse the JSON response."""
+    if not _aoai_client:
+        raise HTTPException(status_code=503, detail="Azure OpenAI is not configured")
+    import json as _json
+    try:
+        response = _aoai_client.chat.completions.create(
+            model=_AOAI_DEPLOYMENT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=_AOAI_TEMPERATURE,
+            max_completion_tokens=_AOAI_MAX_TOKENS,
+        )
+        content = response.choices[0].message.content.strip()
+        # Strip markdown code fences if the model wraps them anyway
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+        if content.endswith("```"):
+            content = content[:-3].strip()
+        if content.startswith("json"):
+            content = content[4:].strip()
+        return _json.loads(content)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM error: {exc}")
+
+
+@app.post("/api/milestones/{milestone_id}/insights")
+def milestone_insights(milestone_id: int, user: dict = Depends(get_current_user)) -> dict:
+    ctx = _gather_milestone_context(milestone_id)
+    if not ctx:
+        raise HTTPException(status_code=404, detail="Milestone not found")
+    prompt = _build_milestone_prompt(ctx)
+    result = _call_llm(prompt)
+    result["milestone_key"] = ctx["milestone"].get("issue_key", "")
+    result["milestone_title"] = ctx["milestone"].get("title", "")
+    result["progress"] = {"done": ctx["done"], "total": ctx["total"], "pct": ctx["pct"], "blocked": ctx["blocked"]}
+    return result
+
+
+@app.post("/api/boards/{board_id}/insights")
+def board_insights(board_id: int, user: dict = Depends(get_current_user)) -> dict:
+    board = fetch_board_by_id(board_id)
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+    all_items = fetch_items(board_id)
+    milestones = [it for it in all_items if it.get("item_type") == "IDEA"]
+    if not milestones:
+        raise HTTPException(status_code=400, detail="No milestones on this board")
+    milestones_ctx = []
+    for ms in milestones:
+        ctx = _gather_milestone_context(ms["id"])
+        if ctx:
+            milestones_ctx.append(ctx)
+    prompt = _build_board_prompt(board, milestones_ctx)
+    result = _call_llm(prompt)
+    result["board_name"] = board.get("name", "")
+    result["milestone_count"] = len(milestones_ctx)
+    return result
