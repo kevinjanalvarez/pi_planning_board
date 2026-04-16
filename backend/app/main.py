@@ -940,38 +940,65 @@ def _sync_external_ticket_fields(items: list[dict], user_id: int | None = None) 
         source = _normalize_ticket_source(item.get("ticket_source"))
         issue_key = (item.get("issue_key") or "").strip()
 
-        if source != SOURCE_JIRA or not issue_key:
+        if source == SOURCE_JIRA and issue_key:
+            try:
+                issue = fetch_jira_issue(issue_key, user_id)
+            except HTTPException:
+                synced.append(item)
+                continue
+
+            changed = any(
+                [
+                    item.get("jira_assignee") != issue.get("assignee"),
+                    item.get("jira_shirt_size") != issue.get("shirt_size"),
+                    item.get("jira_status") != issue.get("status"),
+                    item.get("jira_description") != issue.get("description"),
+                ]
+            )
+
+            if not changed:
+                synced.append(item)
+                continue
+
+            updated = update_item_external_fields(
+                item["id"],
+                assignee=issue.get("assignee"),
+                shirt_size=issue.get("shirt_size"),
+                status=issue.get("status"),
+                description=issue.get("description"),
+            )
+            synced.append(updated or item)
+
+        elif source == SOURCE_ADO and issue_key:
+            try:
+                issue = fetch_ado_work_item(issue_key, user_id)
+            except HTTPException:
+                synced.append(item)
+                continue
+
+            changed = any(
+                [
+                    item.get("jira_assignee") != issue.get("assignee"),
+                    item.get("jira_status") != issue.get("status"),
+                    item.get("jira_description") != issue.get("description"),
+                ]
+            )
+
+            if not changed:
+                synced.append(item)
+                continue
+
+            updated = update_item_external_fields(
+                item["id"],
+                assignee=issue.get("assignee"),
+                shirt_size=None,
+                status=issue.get("status"),
+                description=issue.get("description"),
+            )
+            synced.append(updated or item)
+
+        else:
             synced.append(item)
-            continue
-
-        try:
-            issue = fetch_jira_issue(issue_key, user_id)
-        except HTTPException:
-            # Keep cached values when JIRA is unavailable or key is invalid.
-            synced.append(item)
-            continue
-
-        changed = any(
-            [
-                item.get("jira_assignee") != issue.get("assignee"),
-                item.get("jira_shirt_size") != issue.get("shirt_size"),
-                item.get("jira_status") != issue.get("status"),
-                item.get("jira_description") != issue.get("description"),
-            ]
-        )
-
-        if not changed:
-            synced.append(item)
-            continue
-
-        updated = update_item_external_fields(
-            item["id"],
-            assignee=issue.get("assignee"),
-            shirt_size=issue.get("shirt_size"),
-            status=issue.get("status"),
-            description=issue.get("description"),
-        )
-        synced.append(updated or item)
 
     return synced
 

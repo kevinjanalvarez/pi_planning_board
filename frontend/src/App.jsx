@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import html2canvas from "html2canvas";
 import Dashboard from "./Dashboard";
 import AdminUsers from "./AdminUsers";
 import KanbanBoard from "./KanbanBoard";
@@ -233,7 +234,8 @@ function getTicketLabel(item) {
 }
 
 function getTicketMetaLine(item) {
-  if ((item?.ticket_source || "").toLowerCase() !== "jira") {
+  const source = (item?.ticket_source || "").toLowerCase();
+  if (source !== "jira" && source !== "ado") {
     return "";
   }
   const parts = [];
@@ -260,7 +262,7 @@ function getStatusTone(status) {
   if (value.includes("ready")) {
     return "ready";
   }
-  if (value.includes("development")) {
+  if (value.includes("development") || value.includes("dev")) {
     return "in-progress";
   }
   if (value.includes("icebox") || value.includes("refill")) {
@@ -279,6 +281,81 @@ function getStatusTone(status) {
     return "todo";
   }
   return "unknown";
+}
+
+/**
+ * Calculate milestone progress based on linked items' statuses.
+ * Works for both JIRA and ADO tickets.
+ */
+function getMilestoneProgress(milestoneId, items, links) {
+  // Find all item IDs linked to this milestone (any direction, any link type)
+  const linkedIds = new Set();
+  for (const link of links) {
+    if (link.source_item_id === milestoneId) linkedIds.add(link.target_item_id);
+    if (link.target_item_id === milestoneId) linkedIds.add(link.source_item_id);
+  }
+  // Gather linked items (only TASKs, not other milestones)
+  const linkedItems = items.filter((it) => linkedIds.has(it.id) && it.item_type !== "IDEA");
+  const total = linkedItems.length;
+  if (total === 0) return { total: 0, done: 0, pct: 0, linkedItems };
+  const done = linkedItems.filter((it) => getStatusTone(it.jira_status) === "done").length;
+  const pct = Math.round((done / total) * 100);
+  return { total, done, pct, linkedItems };
+}
+
+/**
+ * Milestone RAG (Red/Amber/Green) health indicator.
+ *
+ * Rules:
+ *  🔴 Red   — overdue & incomplete, OR any task blocked, OR progress >25pts behind timeline
+ *  🟡 Amber — progress lagging 10-25pts behind timeline, OR past 75% timeline & <50% done
+ *  🟢 Green — on track or ahead
+ *
+ * Timeline % = how far today is between milestone start_date → end_date (clamped 0-100).
+ * Falls back to board date range when milestone dates are unavailable.
+ */
+function getMilestoneRAG(milestone, prog, boardStartDate, boardEndDate, months) {
+  const { pct, linkedItems } = prog;
+
+  // Count blocked tasks
+  const blocked = linkedItems.filter((it) => getStatusTone(it.jira_status) === "blocked").length;
+
+  // 100% complete → always green
+  if (pct === 100) return { rag: "green", label: "On Track", icon: "🟢", color: "#15803d" };
+
+  // Determine timeline progress — prefer slot-derived dates (updated on drag)
+  const today = new Date();
+  const slotStart = months && milestone.start_slot != null ? slotToDate(months, milestone.start_slot) : null;
+  const slotEnd = months && milestone.end_slot != null ? slotToDate(months, milestone.end_slot) : null;
+  const msStart = slotStart ? new Date(`${slotStart}T00:00:00`)
+    : milestone.target_date ? new Date(`${milestone.target_date}T00:00:00`) : null;
+  const msEnd = slotEnd ? new Date(`${slotEnd}T00:00:00`)
+    : milestone.end_date ? new Date(`${milestone.end_date}T00:00:00`) : null;
+  const bStart = boardStartDate ? new Date(`${boardStartDate}T00:00:00`) : null;
+  const bEnd = boardEndDate ? new Date(`${boardEndDate}T00:00:00`) : null;
+  const start = msStart && !isNaN(msStart) ? msStart : bStart;
+  const end = msEnd && !isNaN(msEnd) ? msEnd : bEnd;
+
+  let timelinePct = 0;
+  let overdue = false;
+  if (start && end && end > start) {
+    const elapsed = today - start;
+    const total = end - start;
+    timelinePct = Math.round(Math.min(Math.max((elapsed / total) * 100, 0), 100));
+    overdue = today > end;
+  }
+
+  // RED: overdue & not done, blocked tasks, or severely lagging
+  if (overdue) return { rag: "red", label: "At Risk", icon: "🔴", color: "#dc2626" };
+  if (blocked > 0) return { rag: "red", label: "Blocked", icon: "🔴", color: "#dc2626" };
+  if (timelinePct > 0 && (timelinePct - pct) > 25) return { rag: "red", label: "At Risk", icon: "🔴", color: "#dc2626" };
+
+  // AMBER: lagging or running out of time
+  if (timelinePct > 75 && pct < 50) return { rag: "amber", label: "Warning", icon: "🟡", color: "#d97706" };
+  if (timelinePct > 0 && (timelinePct - pct) > 10) return { rag: "amber", label: "Warning", icon: "🟡", color: "#d97706" };
+
+  // GREEN: on track
+  return { rag: "green", label: "On Track", icon: "🟢", color: "#15803d" };
 }
 
 const authInputStyle = {
@@ -396,6 +473,7 @@ export default function App() {
   const [activityLog, setActivityLog] = useState([]);
   const [avatarMenuOpen, setAvatarMenuOpen] = useState(false);
   const boardWrapRef = useRef(null);
+  const ganttRef = useRef(null);
   const resizeStateRef = useRef(null);
 
   function handleLogout() {
@@ -1379,6 +1457,23 @@ export default function App() {
     }
   }
 
+  async function exportGanttPng() {
+    if (!ganttRef.current) return;
+    try {
+      const canvas = await html2canvas(ganttRef.current, {
+        backgroundColor: "#ffffff",
+        scale: 2,
+        useCORS: true,
+      });
+      const link = document.createElement("a");
+      link.download = `gantt_${selectedBoard?.name || "board"}_${new Date().toISOString().slice(0, 10)}.png`;
+      link.href = canvas.toDataURL("image/png");
+      link.click();
+    } catch (err) {
+      setError("Failed to export Gantt chart: " + err.message);
+    }
+  }
+
   async function commitBoard() {
     setError("");
     try {
@@ -1770,8 +1865,24 @@ export default function App() {
               : ""}
           </span>
 
-          {/* Right — links toggle + legend + history */}
+          {/* Right — links toggle / export + legend + history */}
           <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+            {showGantt ? (
+              <button
+                type="button"
+                onClick={exportGanttPng}
+                style={{
+                  display: "flex", alignItems: "center", gap: 4,
+                  padding: "5px 12px", fontSize: 12, fontWeight: 600,
+                  background: "none", color: "#374151",
+                  border: "1px solid #e5e7eb", borderRadius: 6, cursor: "pointer",
+                }}
+                title="Export Gantt chart as PNG"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export PNG
+              </button>
+            ) : (
             <label className="link-toggle-switch" title="Show or hide link visuals">
               <span className="link-toggle-text">Links</span>
               <input
@@ -1788,6 +1899,7 @@ export default function App() {
               />
               <span className="link-toggle-slider" />
             </label>
+            )}
             <div style={{ position: "relative", display: "inline-block" }}>
               <button
                 type="button"
@@ -2007,6 +2119,7 @@ export default function App() {
           {showGantt ? (
             /* ── Gantt Chart View ── */
             <div style={{ padding: "20px 28px", overflowX: "auto", fontFamily: "var(--font-family)" }}>
+              <div ref={ganttRef}>
               {(() => {
                 const months = board.months || [];
                 const allSlots = months.flatMap((m) => m.slots);
@@ -2047,16 +2160,6 @@ export default function App() {
                   const dayInWeek = ((parsed.getDate() - 1) % 7);
                   return todaySlot * colW + (dayInWeek / 7) * colW;
                 })() : null;
-
-                // Build a lookup for item positions (for dependency arrows)
-                const itemPositions = {};
-
-                // Dependency links between items on the Gantt
-                const ganttLinks = (board.links || []).filter((link) => {
-                  const src = items.find((i) => i.id === link.source_item_id);
-                  const tgt = items.find((i) => i.id === link.target_item_id);
-                  return src && tgt;
-                });
 
                 return (
                   <div style={{ position: "relative", background: panelBg, borderRadius: 8, border: `1px solid ${borderClr}`, overflow: "hidden" }}>
@@ -2138,29 +2241,13 @@ export default function App() {
                                 const width = (item.end_slot - item.start_slot + 1) * colW - 8;
                                 const top = li * rowH + 6;
                                 const barH = rowH - 12;
-                                // Record position for dependency arrows
-                                const rowOffset = rows.slice(0, rows.findIndex((r) => r.index === item.row_index)).reduce((sum, r2) => {
-                                  const ri = itemsByRow[r2.index] || [];
-                                  const lns = [];
-                                  for (const it of ri) {
-                                    let pl = false;
-                                    for (const ln of lns) { if (ln.every((x) => x.end_slot < it.start_slot || x.start_slot > it.end_slot)) { ln.push(it); pl = true; break; } }
-                                    if (!pl) lns.push([it]);
-                                  }
-                                  return sum + Math.max(lns.length, 1) * rowH;
-                                }, 0);
-                                itemPositions[item.id] = {
-                                  rightX: left + width,
-                                  leftX: left,
-                                  centerY: rowOffset + top + barH / 2,
-                                };
                                 return (
                                   <div key={item.id} title={`${item.issue_key || ""} ${item.title}\nStatus: ${item.jira_status || "N/A"}\nAssignee: ${item.jira_assignee || "N/A"}`}
                                     style={{
                                       position: "absolute", left, top, width, height: barH,
                                       background: statusColor(item.jira_status),
                                       borderRadius: 4, cursor: "pointer",
-                                      display: "flex", alignItems: "center", padding: "0 8px",
+                                      display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 8px",
                                       overflow: "hidden", boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
                                       transition: "opacity 0.15s",
                                     }}
@@ -2171,9 +2258,19 @@ export default function App() {
                                     <span style={{
                                       fontSize: 11, fontWeight: 600, color: statusText(item.jira_status),
                                       whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                                      lineHeight: 1.2,
                                     }}>
                                       {item.issue_key ? `${item.issue_key} · ` : ""}{item.title}
                                     </span>
+                                    {item.jira_status && (
+                                      <span style={{
+                                        fontSize: 9, fontWeight: 500, color: statusText(item.jira_status),
+                                        opacity: 0.8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                                        lineHeight: 1.2, marginTop: 1,
+                                      }}>
+                                        {item.jira_status}
+                                      </span>
+                                    )}
                                   </div>
                                 );
                               })
@@ -2183,43 +2280,11 @@ export default function App() {
                       );
                     })}
 
-                    {/* Dependency arrows (SVG overlay) — respects showLinks toggle */}
-                    {showLinks && ganttLinks.length > 0 && (
-                      <svg style={{ position: "absolute", top: headerH, left: labelW, width: totalSlots * colW, height: rows.reduce((sum, r) => {
-                        const ri = itemsByRow[r.index] || [];
-                        const lns = [];
-                        for (const it of ri) { let pl = false; for (const ln of lns) { if (ln.every((x) => x.end_slot < it.start_slot || x.start_slot > it.end_slot)) { ln.push(it); pl = true; break; } } if (!pl) lns.push([it]); }
-                        return sum + Math.max(lns.length, 1) * rowH;
-                      }, 0), pointerEvents: "none", overflow: "visible" }}>
-                        <defs>
-                          <marker id="ganttArrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
-                            <path d="M0,0 L0,6 L8,3 z" fill="#64748b" />
-                          </marker>
-                        </defs>
-                        {ganttLinks.map((link) => {
-                          const src = itemPositions[link.source_item_id];
-                          const tgt = itemPositions[link.target_item_id];
-                          if (!src || !tgt) return null;
-                          const x1 = src.rightX;
-                          const y1 = src.centerY;
-                          const x2 = tgt.leftX;
-                          const y2 = tgt.centerY;
-                          const mx = (x1 + x2) / 2;
-                          const style = getLinkStyle(link.link_type);
-                          return (
-                            <path key={link.id} d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`}
-                              stroke={style.stroke} strokeWidth="1" fill="none"
-                              strokeDasharray={style.dasharray} markerEnd="url(#ganttArrow)" opacity="0.7" />
-                          );
-                        })}
-                      </svg>
-                    )}
-
                     {/* Milestones row */}
                     {(() => {
                       const milestones = (board.items || []).filter((t) => t.item_type === "IDEA" && t.start_slot != null);
                       if (!milestones.length) return null;
-                      const msRowH = Math.max(milestones.length * 28 + 8, rowH);
+                      const msRowH = Math.max(milestones.length * 44 + 8, rowH);
                       return (
                         <div style={{ display: "flex", borderBottom: `1px solid ${gridClr}` }}>
                           <div style={{
@@ -2248,23 +2313,36 @@ export default function App() {
                             )}
                             {milestones.map((ms, mi) => {
                               const cx = ms.start_slot * colW + colW / 2;
-                              const myTop = mi * 28 + 4;
+                              const myTop = mi * 44 + 4;
+                              const prog = getMilestoneProgress(ms.id, board.items || [], board.links || []);
+                              const rag = getMilestoneRAG(ms, prog, selectedBoard?.start_date, selectedBoard?.end_date, months);
                               return (
-                                <div key={ms.id} style={{ position: "absolute", left: cx - 8, top: myTop, display: "flex", alignItems: "center", cursor: "pointer" }}
-                                  title={`${ms.issue_key || ""} ${ms.title}`}
+                                <div key={ms.id} style={{ position: "absolute", left: cx - 8, top: myTop, display: "flex", alignItems: "flex-start", cursor: "pointer" }}
+                                  title={`${ms.issue_key || ""} ${ms.title} — ${rag.label}${prog.total ? ` · ${prog.done}/${prog.total} done (${prog.pct}%)` : ""}`}
                                   onClick={() => setSelectedTicketId(ms.id)}
                                 >
                                   <div style={{
-                                    width: 14, height: 14, background: "#f59e0b",
+                                    width: 14, height: 14, background: rag.color,
                                     transform: "rotate(45deg)", borderRadius: 2, flexShrink: 0,
                                     boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
+                                    marginTop: 2, transition: "background 0.3s",
                                   }} />
-                                  <span style={{
-                                    marginLeft: 12, fontSize: 11, fontWeight: 600, color: "#92400e",
-                                    whiteSpace: "nowrap", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis",
-                                  }}>
-                                    {ms.issue_key ? `${ms.issue_key} · ` : ""}{ms.title}
-                                  </span>
+                                  <div style={{ marginLeft: 12, display: "flex", flexDirection: "column" }}>
+                                    <span style={{
+                                      fontSize: 11, fontWeight: 600, color: rag.color,
+                                      whiteSpace: "nowrap", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis",
+                                    }}>
+                                      {ms.issue_key ? `${ms.issue_key} · ` : ""}{ms.title}
+                                    </span>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
+                                      <div style={{ width: 48, height: 5, background: "#e5e7eb", borderRadius: 3, overflow: "hidden" }}>
+                                        <div style={{ width: `${prog.pct}%`, height: "100%", background: rag.color, borderRadius: 3, transition: "width 0.3s" }} />
+                                      </div>
+                                      <span style={{ fontSize: 10, fontWeight: 700, color: rag.color, whiteSpace: "nowrap" }}>
+                                        {prog.pct}%{rag.rag !== "green" ? ` · ${rag.rag === "red" ? "AT RISK" : "WARNING"}` : ""}
+                                      </span>
+                                    </div>
+                                  </div>
                                 </div>
                               );
                             })}
@@ -2291,6 +2369,7 @@ export default function App() {
                   </div>
                 );
               })()}
+              </div>
             </div>
           ) : (
           <div className="board-wrap" ref={boardWrapRef}>
@@ -2478,7 +2557,6 @@ export default function App() {
                               >
                                 <div className="resize-handle resize-handle-left" onMouseDown={(e) => startResize(e, item, "left")} />
                                 <div className="resize-handle resize-handle-right" onMouseDown={(e) => startResize(e, item, "right")} />
-                                <div className="ticket-status-dot" title={item.jira_status || "N/A"} />
                                 {(item.sync_status === "sync_failed" || item.sync_status === "unsynced") ? (
                                   <div
                                     title="This task was saved locally but could not be created in the ticket system. Please create the ticket manually and link it here."
@@ -2519,7 +2597,37 @@ export default function App() {
                                     {isLinkSource ? "" : "+"}
                                   </div>
                                 ) : null}
-                                <strong>{truncateSummaryBySpan(getTicketLabel(item), itemSpan)}</strong>
+                                {item.item_type === "IDEA" && (() => {
+                                  const prog = getMilestoneProgress(item.id, board.items || [], board.links || []);
+                                  const rag = getMilestoneRAG(item, prog, selectedBoard?.start_date, selectedBoard?.end_date, board.months);
+                                  if (rag.rag === "green") return null;
+                                  const badgeLabel = rag.rag === "red" ? "AT RISK" : "WARNING";
+                                  return (
+                                    <div
+                                      title={`${rag.label}${prog.total ? ` · ${prog.done}/${prog.total} done (${prog.pct}%)` : ""}`}
+                                      style={{
+                                        position: "absolute", top: 3, right: 6,
+                                        fontSize: "9px", fontWeight: 700,
+                                        color: "#fff", background: rag.color,
+                                        borderRadius: 3, padding: "1px 4px",
+                                        lineHeight: 1.4, letterSpacing: "0.02em",
+                                        pointerEvents: "none", zIndex: 3,
+                                      }}
+                                    >
+                                      {badgeLabel}
+                                    </div>
+                                  );
+                                })()}
+                                <strong>
+                                  {item.item_type === "IDEA"
+                                    ? (() => {
+                                        const prog = getMilestoneProgress(item.id, board.items || [], board.links || []);
+                                        const label = getTicketLabel(item);
+                                        return <>{truncateSummaryBySpan(label, itemSpan)} {prog.pct}%</>;
+                                      })()
+                                    : truncateSummaryBySpan(getTicketLabel(item), itemSpan)
+                                  }
+                                </strong>
                                 <span title={item.title}>{truncateSummaryBySpan(item.title, itemSpan)}</span>
                                 {getTicketMetaLine(item) ? (
                                   <div className="ticket-meta" title={getTicketMetaLine(item)}>
@@ -3004,7 +3112,7 @@ export default function App() {
       ) : null}
 
       {itemAction ? (
-        <div className="menu" style={{ left: itemAction.x, top: itemAction.y }} onClick={(e) => e.stopPropagation()}>
+        <div className="menu" style={{ left: "50%", top: "50%", transform: "translate(-50%, -50%)" }} onClick={(e) => e.stopPropagation()}>
           <div className="item-action-menu">
             <div className="item-details">
               <div className="detail-row">
@@ -3056,7 +3164,7 @@ export default function App() {
       ) : null}
 
       {deleteConfirm ? (
-        <div className="menu" style={{ left: deleteConfirm.x, top: deleteConfirm.y }} onClick={(e) => e.stopPropagation()}>
+        <div className="menu" style={{ left: "50%", top: "50%", transform: "translate(-50%, -50%)" }} onClick={(e) => e.stopPropagation()}>
           <div className="item-action-menu delete-confirm-menu">
             <div className="confirm-text">Delete {truncateText(deleteConfirm.itemLabel)}?</div>
             <div className="confirm-note">This removes the card from this board only. The external ticket (JIRA/ADO) will not be deleted.</div>
@@ -3073,7 +3181,7 @@ export default function App() {
       ) : null}
 
       {linkTypeMenu ? (
-        <div className="menu" style={{ left: linkTypeMenu.x, top: linkTypeMenu.y }} onClick={(e) => e.stopPropagation()}>
+        <div className="menu" style={{ left: "50%", top: "50%", transform: "translate(-50%, -50%)" }} onClick={(e) => e.stopPropagation()}>
           <div className="item-action-menu link-type-menu">
             <div className="confirm-text">Choose link type</div>
             <label className="link-type-field">

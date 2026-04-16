@@ -33,11 +33,12 @@ PI planning sessions are a cornerstone of the Scaled Agile Framework (SAFe), but
 | **User authentication** | JWT-based login/register with role-based access (user/admin) |
 | **Dashboard** | Multi-board hub — create, edit, archive, clone, delete, and assign PI Planning or Kanban boards |
 | **PI Planning board** | Interactive planning surface with monthly columns (WK1–WK4), milestone row, up to 10 team rows, drag-to-reposition, and multi-slot span |
-| **Gantt chart** | Timeline view with status-based bar coloring, today line, enhanced milestones (diamond + IDEA key + title), and PNG export via html2canvas |
+| **Gantt chart** | Timeline view with status-based bar coloring, today line, milestone RAG health (diamond + progress bar colored by risk), and PNG export via html2canvas |
 | **Kanban board** | Custom columns, swimlane rows, card creation (manual or from JIRA/ADO), drag-and-drop movement |
+| **Milestone RAG health** | Auto-calculated Red/Amber/Green status for milestones based on timeline progress, blocked tasks, and overdue state. PI board shows "AT RISK" / "WARNING" badge; Gantt colors the diamond, title, and progress bar |
 | **Dependency linking** | Draw `blocks`, `depends_on`, and `relates_to` links between work items across teams |
 | **JIRA integration** | Fetch issue metadata, create new JIRA tickets, lookup by key, per-user credential storage |
-| **ADO integration** | Create and fetch Azure DevOps User Story work items, per-user PAT storage |
+| **ADO integration** | Create and fetch Azure DevOps work items, status/assignee sync from ADO, per-user PAT storage |
 | **Admin panel** | User CRUD, role assignment, board assignment, credential management per user |
 | **User profile** | Update display name, change password, manage personal JIRA/ADO integrations with connection testing |
 | **Activity log** | Append-only transaction history capturing every board event |
@@ -317,3 +318,30 @@ cat ~/hcph_frontend.log
 - Only `issuetype = IDEA` is allowed for the Milestone row
 - Per-user JIRA credentials are stored encrypted; admin can also manage credentials on behalf of users
 - If your on-prem JIRA uses a different auth mode, adjust `fetch_jira_summary` in backend
+
+---
+
+## Status Color Mapping
+
+Standardized across PI board and Gantt chart for both JIRA and ADO statuses:
+
+| Status Tone | Matched Keywords | Color | Hex |
+|---|---|---|---|
+| **Done** | done, resolved, closed | Green | `#15803d` |
+| **In Progress** | development, dev, progress, active, ongoing | Orange | `#ea7a12` |
+| **Blocked** | block, hold | Red | `#dc2626` |
+| **To Do** | todo, open, backlog, new | Slate | `#64748b` |
+| **Design** | design | Gold | `#d4a017` |
+| **Ready** | ready | Gold | `#d4a017` |
+| **Icebox** | icebox, refill | Red | `#dc2626` |
+| **Unknown** | (no match / empty) | Gray | `#94a3b8` |
+
+### Milestone RAG Health
+
+Applied only to IDEA milestones. Evaluated in order — first match wins:
+
+| RAG | Condition | PI Board | Gantt |
+|---|---|---|---|
+| 🟢 Green | 100% done, or no red/amber triggers | No badge (clean tile) | Green diamond, green text |
+| 🟡 Amber | >75% timeline with <50% done, or timeline-progress gap >10% | "WARNING" badge (top-right) | Amber diamond + "WARNING" label |
+| 🔴 Red | Overdue, any blocked tasks, or timeline-progress gap >25% | "AT RISK" badge (top-right) | Red diamond + "AT RISK" label |

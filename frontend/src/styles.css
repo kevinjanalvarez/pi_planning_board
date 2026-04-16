@@ -841,11 +841,11 @@ body {
 }
 
 .ticket-status-design {
-  --status-accent: #f3e6a1;
+  --status-accent: #d4a017;
 }
 
 .ticket-status-ready {
-  --status-accent: #f3e6a1;
+  --status-accent: #d4a017;
 }
 
 .ticket-status-icebox {
