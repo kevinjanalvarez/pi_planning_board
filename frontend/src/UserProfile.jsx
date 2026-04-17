@@ -134,8 +134,8 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
             email: d.email || "",
             jira_url: d.jira_url || "",
             ado_org: d.ado_org || "",
-            password: d.password_masked || "",
-            pat: d.pat_masked || "",
+            password: "",
+            pat: "",
           }));
         }
       } catch {}
@@ -144,10 +144,10 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
 
   async function handleCredSave() {
     setCredError("");
-    if (credForm.provider === "jira" && (!credForm.email.trim() || !credForm.password.trim())) {
+    if (!editProvider && credForm.provider === "jira" && (!credForm.email.trim() || !credForm.password.trim())) {
       setCredError("Email and password are required for Jira."); return;
     }
-    if (credForm.provider === "ado" && !credForm.pat.trim()) {
+    if (!editProvider && credForm.provider === "ado" && !credForm.pat.trim()) {
       setCredError("Personal Access Token is required for Azure DevOps."); return;
     }
     setCredSaving(true);
@@ -166,10 +166,10 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
 
   async function handleCredTest() {
     setTestResult(null); setCredError("");
-    if (credForm.provider === "jira" && (!credForm.email.trim() || !credForm.password.trim())) {
+    if (!editProvider && credForm.provider === "jira" && (!credForm.email.trim() || !credForm.password.trim())) {
       setCredError("Fill in email and password before testing."); return;
     }
-    if (credForm.provider === "ado" && !credForm.pat.trim()) {
+    if (!editProvider && credForm.provider === "ado" && !credForm.pat.trim()) {
       setCredError("Fill in the PAT before testing."); return;
     }
     setTesting(true);
@@ -568,7 +568,7 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
                 </div>
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>API Token / Password</label>
-                  <input style={inputStyle} type="password" placeholder="••••••••" value={credForm.password} autoComplete="new-password"
+                  <input style={inputStyle} type="password" placeholder={editProvider ? "Using saved password" : "••••••••"} value={credForm.password} autoComplete="new-password"
                     onChange={(e) => setCredForm((f) => ({ ...f, password: e.target.value }))} />
                 </div>
               </>
@@ -581,7 +581,7 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
                 </div>
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Personal Access Token</label>
-                  <input style={inputStyle} type="password" placeholder="••••••••" value={credForm.pat} autoComplete="new-password"
+                  <input style={inputStyle} type="password" placeholder={editProvider ? "Using saved PAT" : "••••••••"} value={credForm.pat} autoComplete="new-password"
                     onChange={(e) => setCredForm((f) => ({ ...f, pat: e.target.value }))} />
                 </div>
               </>

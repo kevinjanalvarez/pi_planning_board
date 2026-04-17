@@ -4,8 +4,91 @@ const API_BASE = import.meta.env.VITE_API_BASE || "http://0.0.0.0:8000";
 
 const DEFAULT_COL_COLORS = ["#3b82f6", "#f59e0b", "#10b981", "#8b5cf6", "#ec4899", "#ef4444", "#06b6d4"];
 
+// ── Status-to-column tone map (mirrors PI board logic) ──
+// Maps external statuses to a tone, then tone maps to column aliases.
+const STATUS_TONE_MAP = {
+  // In Progress
+  "in dev": "in-progress",
+  "in development": "in-progress",
+  "development": "in-progress",
+  "in progress": "in-progress",
+  "in test": "in-progress",
+  "in testing": "in-progress",
+  "testing": "in-progress",
+  "test": "in-progress",
+  "active": "in-progress",
+  "ongoing": "in-progress",
+  "doing": "in-progress",
+  "wip": "in-progress",
+  "in review": "in-progress",
+  "review": "in-progress",
+  "committed": "in-progress",
+  // Done
+  "done": "done",
+  "resolved": "done",
+  "closed": "done",
+  "completed": "done",
+  "finished": "done",
+  // Blocked
+  "blocked": "blocked",
+  "on hold": "blocked",
+  "impediment": "blocked",
+  // To Do
+  "to do": "todo",
+  "todo": "todo",
+  "open": "todo",
+  "new": "todo",
+  "backlog": "todo",
+  "not started": "todo",
+  // Design
+  "design": "design",
+  "discovery": "design",
+  "analysis": "design",
+  // Ready
+  "ready": "ready",
+  "ready for dev": "ready",
+  "refined": "ready",
+  // Icebox
+  "icebox": "icebox",
+  "refill": "icebox",
+  "frozen": "icebox",
+};
+
+// Tone → list of column name aliases to match against
+const TONE_COLUMN_ALIASES = {
+  "in-progress": ["in progress", "inprogress", "in-progress", "wip", "doing", "active"],
+  "done":        ["done", "completed", "resolved", "closed", "finished"],
+  "blocked":     ["blocked", "on hold", "impediment"],
+  "todo":        ["to do", "todo", "backlog", "open", "not started"],
+  "design":      ["design", "discovery", "analysis"],
+  "ready":       ["ready", "refined"],
+  "icebox":      ["icebox", "frozen", "parking lot"],
+};
+
+function getStatusTone(status) {
+  const value = (status || "").trim().toLowerCase();
+  if (!value) return "unknown";
+  if (STATUS_TONE_MAP[value]) return STATUS_TONE_MAP[value];
+  // Fallback: keyword matching
+  for (const [keyword, tone] of Object.entries(STATUS_TONE_MAP)) {
+    if (value.includes(keyword)) return tone;
+  }
+  return "unknown";
+}
+
+function findColumnByTone(tone, columns) {
+  const aliases = TONE_COLUMN_ALIASES[tone];
+  if (!aliases || !columns.length) return null;
+  for (const col of columns) {
+    const colName = col.name.trim().toLowerCase();
+    if (aliases.includes(colName)) return col;
+  }
+  return null;
+}
+
 export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, onProfile, onIntegrations, onManageUsers, pendingCount, integrationWarnings }) {
   const [columns, setColumns] = useState([]);
+  const [rows, setRows] = useState([]);
   const [cards, setCards] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -19,8 +102,9 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
   // Card creation
   const [addCardColId, setAddCardColId] = useState(null);
   const [newCardTitle, setNewCardTitle] = useState("");
-  const [addCardMode, setAddCardMode] = useState("manual"); // "manual" | "ticket"
-  const [ticketSource, setTicketSource] = useState("jira");
+  const [newCardDesc, setNewCardDesc] = useState("");
+  const [newCardAssignee, setNewCardAssignee] = useState("");
+  const [addCardMode, setAddCardMode] = useState("internal"); // "internal" | "jira" | "ado"
   const [ticketKey, setTicketKey] = useState("");
   const [ticketLookup, setTicketLookup] = useState(null); // fetched ticket info
   const [ticketLoading, setTicketLoading] = useState(false);
@@ -29,6 +113,13 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
   // Editing
   const [editCol, setEditCol] = useState(null);
   const [editCard, setEditCard] = useState(null);
+
+  // Card detail view (double-click)
+  const [viewCard, setViewCard] = useState(null);
+
+  // AI Insights
+  const [insightsPanel, setInsightsPanel] = useState(false);
+  const [insightsData, setInsightsData] = useState(null);
 
   // Confirm dialog
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -44,6 +135,7 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
       if (!res.ok) throw new Error("Failed to load kanban board");
       const data = await res.json();
       setColumns(data.columns || []);
+      setRows(data.rows || []);
       setCards(data.cards || []);
     } catch (e) {
       setError(e.message);
@@ -53,6 +145,20 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
   }, [board.id, apiFetch]);
 
   useEffect(() => { loadBoard(); }, [loadBoard]);
+
+  // ── AI Insights ──
+  async function fetchInsights() {
+    setInsightsPanel(true);
+    setInsightsData({ loading: true, data: null, error: null });
+    try {
+      const res = await apiFetch(`${API_BASE}/api/kanban/${board.id}/insights`, { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.detail || "Failed to generate insights");
+      setInsightsData({ loading: false, data: body, error: null });
+    } catch (err) {
+      setInsightsData({ loading: false, data: null, error: err.message });
+    }
+  }
 
   // ── Column CRUD ──
   async function addColumn() {
@@ -97,14 +203,16 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
     setTicketError("");
     setTicketLookup(null);
     try {
-      const res = await apiFetch(`${API_BASE}/api/kanban/ticket-lookup?key=${encodeURIComponent(ticketKey.trim())}&source=${ticketSource}`);
+      const src = addCardMode; // "jira" or "ado"
+      const res = await apiFetch(`${API_BASE}/api/kanban/ticket-lookup?key=${encodeURIComponent(ticketKey.trim())}&source=${src}`);
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.detail || "Ticket not found");
       }
       const data = await res.json();
       setTicketLookup(data);
-      setNewCardTitle(data.summary || ticketKey.trim());
+      if (data.description) setNewCardDesc(data.description);
+      if (data.assignee) setNewCardAssignee(data.assignee);
     } catch (e) {
       setTicketError(e.message);
     } finally {
@@ -114,27 +222,65 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
 
   async function addCard() {
     if (!addCardColId || !newCardTitle.trim()) return;
-    const body = {
-      column_id: addCardColId,
-      row_id: null,
-      title: newCardTitle.trim(),
-    };
-    if (addCardMode === "ticket" && ticketLookup) {
-      body.issue_key = ticketLookup.issue_key;
-      body.ticket_source = ticketSource;
-      body.description = ticketLookup.summary;
+    const isExternal = (addCardMode === "jira" || addCardMode === "ado") && ticketLookup;
+
+    // Determine target column via tone map
+    let targetColId = addCardColId;
+    if (isExternal && ticketLookup.status && columns.length > 0) {
+      const tone = getStatusTone(ticketLookup.status);
+      const matched = findColumnByTone(tone, columns);
+      targetColId = matched ? matched.id : columns[0].id;
     }
-    await apiFetch(`${API_BASE}/api/kanban/${board.id}/cards`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+
+    // Determine target row via tone map (if swimlanes exist)
+    let targetRowId = rows.length > 0 ? rows[0].id : null;
+    if (isExternal && ticketLookup.status && rows.length > 0) {
+      const tone = getStatusTone(ticketLookup.status);
+      const aliases = TONE_COLUMN_ALIASES[tone];
+      if (aliases) {
+        const matchedRow = rows.find((r) => aliases.includes(r.name.trim().toLowerCase()));
+        if (matchedRow) targetRowId = matchedRow.id;
+      }
+    }
+
+    const body = {
+      column_id: targetColId,
+      row_id: targetRowId,
+      title: newCardTitle.trim(),
+      description: newCardDesc.trim() || null,
+      assignee: newCardAssignee.trim() || null,
+    };
+    if (isExternal) {
+      body.issue_key = ticketLookup.issue_key;
+      body.ticket_source = addCardMode;
+      body.assignee = ticketLookup.assignee || newCardAssignee.trim() || null;
+      body.external_status = ticketLookup.status || null;
+      body.external_url = ticketLookup.external_url || null;
+      body.external_title = ticketLookup.summary || null;
+    }
+    try {
+      const res = await apiFetch(`${API_BASE}/api/kanban/${board.id}/cards`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        setError(d.detail || "Failed to add card");
+        return;
+      }
+    } catch (e) {
+      setError(e.message || "Failed to add card");
+      return;
+    }
     setNewCardTitle("");
+    setNewCardDesc("");
+    setNewCardAssignee("");
     setAddCardColId(null);
     setTicketLookup(null);
     setTicketKey("");
     setTicketError("");
-    setAddCardMode("manual");
+    setAddCardMode("internal");
     loadBoard();
   }
 
@@ -238,6 +384,20 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                 background: "#1d4ed8", color: "#fff", border: "none", borderRadius: 6,
                 padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700,
               }}>+ Column</button>
+            <button
+              onClick={() => { if (insightsPanel) { setInsightsPanel(false); } else { fetchInsights(); } }}
+              style={{
+                background: insightsPanel ? "#eff6ff" : "none",
+                color: insightsPanel ? "#1d4ed8" : "#374151",
+                border: insightsPanel ? "1px solid #bfdbfe" : "1px solid #e5e7eb",
+                borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700,
+                display: "flex", alignItems: "center", gap: 5,
+              }}
+              title={insightsPanel ? "Close AI panel" : "Agile Board Insights"}
+            >
+              <span style={{ fontSize: 14 }}>&#129302;</span>
+              AI Insights
+            </button>
             <div style={{ borderLeft: "1px solid #e5e7eb", height: 24, margin: "0 4px" }} />
             {onManageUsers && pendingCount > 0 && (
               <button
@@ -381,13 +541,14 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
         </div>
       )}
 
-      {/* ── Columns ── */}
+      {/* ── Columns + Insights panel wrapper ── */}
       {columns.length > 0 && (
+        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
         <div style={{
-          display: "flex", gap: 6, padding: "16px 24px", flex: 1,
-          overflowX: "auto", alignItems: "flex-start",
+          display: "flex", gap: 0, flex: 1,
+          overflow: "hidden",
         }}>
-          {columns.map((col) => {
+          {columns.map((col, colIdx) => {
             const colCards = cards.filter((c) => c.column_id === col.id);
             const isOver = dragOverCol === col.id;
             return (
@@ -397,105 +558,341 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                 onDragLeave={() => setDragOverCol(null)}
                 onDrop={() => handleDrop(col.id)}
                 style={{
-                  minWidth: 260, maxWidth: 300, width: 280, flexShrink: 0,
-                  background: isOver ? "#eff6ff" : "#fff",
-                  borderRadius: 12, border: "1px solid #e5e7eb",
+                  flex: 1, minWidth: 0,
+                  background: isOver ? "#f0f4ff" : "#f3f4f6",
                   display: "flex", flexDirection: "column",
                   transition: "background 0.15s",
-                  boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
-                  overflow: "hidden",
+                  borderRight: colIdx < columns.length - 1 ? "1px solid #e5e7eb" : "none",
                 }}
               >
                 {/* Column header */}
                 <div style={{
-                  padding: "10px 14px", borderBottom: `3px solid ${col.color}`,
+                  padding: "10px 14px", borderBottom: "1px solid #e5e7eb",
                   display: "flex", alignItems: "center", justifyContent: "space-between",
+                  background: "#fff",
                 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div style={{ width: 10, height: 10, borderRadius: "50%", background: col.color, flexShrink: 0 }} />
+                    <div style={{ width: 4, height: 20, borderRadius: 2, background: col.color, flexShrink: 0 }} />
                     <span
-                      style={{ fontWeight: 700, fontSize: 14, color: "#111827", cursor: "pointer" }}
+                      style={{ fontWeight: 700, fontSize: 13, color: "#111827", cursor: "pointer", textTransform: "uppercase", letterSpacing: 0.5 }}
                       onClick={() => setEditCol({ ...col })}
                       title="Edit column"
                     >{col.name}</span>
-                    <span style={{
-                      background: "#f3f4f6", borderRadius: 999, padding: "1px 7px",
-                      fontSize: 11, fontWeight: 700, color: "#6b7280",
-                    }}>{colCards.length}</span>
                   </div>
-                  <button onClick={() => removeColumn(col.id)} title="Delete column" style={{
-                    background: "none", border: "none", cursor: "pointer", color: "#9ca3af",
-                    fontSize: 14, padding: "2px 4px", lineHeight: 1,
-                  }}>✕</button>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <button onClick={() => setEditCol({ ...col })} title="Edit column" style={{
+                      background: "none", border: "none", cursor: "pointer", color: "#9ca3af",
+                      fontSize: 13, padding: "2px 4px", lineHeight: 1,
+                    }}>✎</button>
+                    <button onClick={() => removeColumn(col.id)} title="Delete column" style={{
+                      background: "none", border: "none", cursor: "pointer", color: "#9ca3af",
+                      fontSize: 13, padding: "2px 4px", lineHeight: 1,
+                    }}>⋮</button>
+                  </div>
+                </div>
+
+                {/* Add card button - top of column */}
+                <div style={{ padding: "8px 10px 0" }}>
+                  <button
+                    onClick={() => { setAddCardColId(col.id); setNewCardTitle(""); setNewCardDesc(""); setAddCardMode("manual"); setTicketKey(""); setTicketLookup(null); setTicketError(""); }}
+                    style={{
+                      background: "#fff", border: "1px dashed #d1d5db", borderRadius: 6,
+                      padding: "6px 0", width: "100%", cursor: "pointer",
+                      fontSize: 18, color: "#9ca3af", fontWeight: 400,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      transition: "border-color 0.15s, color 0.15s",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#6b7280"; e.currentTarget.style.color = "#6b7280"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#d1d5db"; e.currentTarget.style.color = "#9ca3af"; }}
+                  >+</button>
                 </div>
 
                 {/* Cards */}
-                <div style={{ padding: "8px 10px", flex: 1, minHeight: 60 }}>
-                  {colCards.map((card) => (
+                <div style={{ padding: "8px 10px", flex: 1, overflowY: "auto" }}>
+                  {colCards.map((card) => {
+                    const isExternal = !!card.issue_key;
+                    const sourceLabel = !isExternal ? "Internal" : card.ticket_source === "ado" ? "ADO" : "JIRA";
+                    const sourceBg = !isExternal ? "#e5e7eb" : card.ticket_source === "ado" ? "#fef3c7" : "#dbeafe";
+                    const sourceColor = !isExternal ? "#6b7280" : card.ticket_source === "ado" ? "#92400e" : "#1d4ed8";
+                    const sourceIcon = !isExternal
+                      ? /* board icon */ <svg width="10" height="10" viewBox="0 0 24 24" fill={sourceColor}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                      : card.ticket_source === "ado"
+                      ? /* ADO icon */ <svg width="10" height="10" viewBox="0 0 24 24" fill={sourceColor}><path d="M22 4v9.4L17.6 18l-6.1-2.1v4.6L7.4 16l12.2-1V4H22zM2 7.8l4.5-2.2L18 4v16l-11.5-2L2 15.6V7.8z"/></svg>
+                      : /* JIRA icon */ <svg width="10" height="10" viewBox="0 0 24 24" fill={sourceColor}><path d="M12.005 2c-5.52 0-10 4.48-10 10s4.48 10 10 10 10-4.48 10-10-4.48-10-10-10zm0 3.6v2.9h5.4v2.5h-5.4v2.85L7.605 10l4.4-4.4z"/></svg>;
+
+                    return (
                     <div
                       key={card.id}
                       draggable
                       onDragStart={() => handleDragStart(card)}
                       onDragEnd={() => { setDragCard(null); setDragOverCol(null); }}
+                      onDoubleClick={() => setViewCard(card)}
                       style={{
-                        background: card.color || "#1f6688", color: "#fff",
-                        borderRadius: 8, padding: "10px 12px", marginBottom: 8,
-                        fontSize: 13, fontWeight: 600, cursor: "grab",
-                        display: "flex", alignItems: "flex-start", justifyContent: "space-between",
-                        boxShadow: "0 1px 4px rgba(0,0,0,0.12)",
+                        background: "#fff",
+                        borderRadius: 8, padding: 0, marginBottom: 8,
+                        fontSize: 13, cursor: "grab",
+                        display: "flex", flexDirection: "column",
+                        boxShadow: "0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06)",
                         opacity: dragCard?.id === card.id ? 0.5 : 1,
-                        transition: "opacity 0.15s",
+                        transition: "opacity 0.15s, box-shadow 0.15s",
+                        position: "relative",
+                        borderLeft: `3px solid ${card.color || "#1f6688"}`,
+                        overflow: "hidden",
                       }}
+                      onMouseEnter={(e) => e.currentTarget.style.boxShadow = "0 4px 12px rgba(0,0,0,0.12)"}
+                      onMouseLeave={(e) => e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06)"}
                     >
-                      <span
-                        style={{ flex: 1, cursor: "pointer", wordBreak: "break-word", lineHeight: 1.4 }}
-                        onClick={() => setEditCard({ ...card })}
-                        title="Edit card"
-                      >
-                        {card.issue_key && (
-                          <span style={{
-                            display: "inline-block", fontSize: 10, fontWeight: 700,
-                            background: "rgba(255,255,255,0.25)", borderRadius: 3,
-                            padding: "1px 5px", marginRight: 5, verticalAlign: "middle",
-                            letterSpacing: 0.3,
-                          }}>{card.ticket_source === "ado" ? "ADO" : "JIRA"} {card.issue_key}</span>
-                        )}
-                        {card.title}
-                      </span>
-                      <button onClick={(e) => { e.stopPropagation(); removeCard(card.id); }} style={{
-                        background: "none", border: "none", cursor: "pointer",
-                        color: "rgba(255,255,255,0.6)", fontSize: 12, padding: "0 0 0 8px",
-                        lineHeight: 1, flexShrink: 0,
-                      }}>✕</button>
-                    </div>
-                  ))}
+                      {/* Top row: source badge + actions */}
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 10px 4px" }}>
+                        <span style={{
+                          display: "inline-flex", alignItems: "center", gap: 4,
+                          fontSize: 10, fontWeight: 700, letterSpacing: 0.3,
+                          background: sourceBg, color: sourceColor,
+                          borderRadius: 4, padding: "2px 7px",
+                        }}>
+                          {sourceIcon}
+                          {sourceLabel}
+                        </span>
+                        <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                          <button onClick={(e) => { e.stopPropagation(); setEditCard({ ...card }); }} title="Edit card" style={{
+                            background: "none", border: "none", cursor: "pointer",
+                            color: "#9ca3af", fontSize: 12, padding: "2px 4px", lineHeight: 1,
+                          }}>✎</button>
+                          <button onClick={(e) => { e.stopPropagation(); removeCard(card.id); }} style={{
+                            background: "none", border: "none", cursor: "pointer",
+                            color: "#9ca3af", fontSize: 14, padding: "0 4px",
+                            lineHeight: 1,
+                          }}>×</button>
+                        </div>
+                      </div>
 
-                  {/* Add card button */}
-                  <button
-                    onClick={() => { setAddCardColId(col.id); setNewCardTitle(""); setAddCardMode("manual"); setTicketKey(""); setTicketLookup(null); setTicketError(""); }}
-                    style={{
-                      background: "none", border: "1px dashed #d1d5db", borderRadius: 8,
-                      padding: "8px 12px", width: "100%", cursor: "pointer",
-                      fontSize: 12, color: "#9ca3af", fontWeight: 600,
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: 4,
-                    }}
-                  >
-                    <span style={{ fontSize: 14, lineHeight: 1 }}>+</span> Add card
-                  </button>
+                      {/* Title */}
+                      <div style={{ padding: "2px 10px 6px", fontWeight: 600, color: "#111827", lineHeight: 1.4, wordBreak: "break-word", cursor: "pointer" }}
+                        onClick={() => setEditCard({ ...card })}
+                      >
+                        {card.title}
+                      </div>
+
+                      {/* External link: KEY: Title */}
+                      {isExternal && (
+                        <div style={{ padding: "0 10px 6px" }}>
+                          <a
+                            href={card.external_url || "#"}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => { e.stopPropagation(); if (!card.external_url) e.preventDefault(); }}
+                            style={{
+                              fontSize: 11, fontWeight: 600, color: "#1d4ed8",
+                              textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 4,
+                              cursor: card.external_url ? "pointer" : "default",
+                              lineHeight: 1.4,
+                            }}
+                            onMouseEnter={(e) => { if (card.external_url) e.currentTarget.style.textDecoration = "underline"; }}
+                            onMouseLeave={(e) => e.currentTarget.style.textDecoration = "none"}
+                          >
+                            {card.issue_key}: {card.external_title || card.title}
+                            {card.external_url && (
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                              </svg>
+                            )}
+                          </a>
+                        </div>
+                      )}
+
+                      {/* Footer: status + assignee */}
+                      {(card.external_status || card.assignee) && (
+                        <div style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "5px 10px", borderTop: "1px solid #f3f4f6",
+                          background: "#fafafa",
+                        }}>
+                          {card.external_status && (
+                            <span style={{
+                              fontSize: 10, fontWeight: 600, color: "#6b7280",
+                              background: "#f3f4f6", borderRadius: 3, padding: "2px 6px",
+                              textTransform: "uppercase", letterSpacing: 0.3,
+                            }}>{card.external_status}</span>
+                          )}
+                          {card.assignee && (
+                            <span style={{
+                              fontSize: 10, color: "#6b7280", display: "inline-flex",
+                              alignItems: "center", gap: 3, marginLeft: "auto",
+                            }}>
+                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                              </svg>
+                              {card.assignee}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    );
+                  })}
+                  ))}
                 </div>
               </div>
             );
           })}
         </div>
+
+        {/* ── AI Insights Docked Panel ── */}
+        {insightsPanel && (
+          <div style={{
+            width: 360, minWidth: 360, borderLeft: "1px solid #e5e7eb",
+            background: "#fff", display: "flex", flexDirection: "column",
+            overflow: "hidden",
+          }}>
+            {/* Panel Header */}
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "12px 16px", borderBottom: "1px solid #f3f4f6", flexShrink: 0,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 16 }}>&#129302;</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Agile Board Advisor</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <button type="button" onClick={fetchInsights}
+                  style={{ background: "none", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 11, padding: "2px 8px", cursor: "pointer", color: "#6b7280" }}
+                  title="Refresh insights">↻</button>
+                <button type="button" onClick={() => setInsightsPanel(false)}
+                  style={{ background: "none", border: "none", fontSize: 14, cursor: "pointer", color: "#6b7280", padding: "2px 6px" }}
+                  title="Close panel">✕</button>
+              </div>
+            </div>
+
+            {/* Panel Content */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "14px 16px" }}>
+              {insightsData?.loading ? (
+                <div style={{ textAlign: "center", padding: "40px 0", color: "#6b7280" }}>
+                  <div style={{ fontSize: 20, marginBottom: 8 }}>⏳</div>
+                  <div style={{ fontSize: 12 }}>Analyzing board health...</div>
+                </div>
+              ) : insightsData?.error ? (
+                <div style={{ color: "#dc2626", fontSize: 12, padding: "16px 0" }}>{insightsData.error}</div>
+              ) : insightsData?.data ? (() => {
+                const d = insightsData.data;
+                const healthColor = d.board_health === "green" ? "#15803d" : d.board_health === "amber" ? "#d97706" : d.board_health === "red" ? "#dc2626" : "#6b7280";
+                const healthBg = d.board_health === "green" ? "#f0fdf4" : d.board_health === "amber" ? "#fffbeb" : d.board_health === "red" ? "#fef2f2" : "#f9fafb";
+                const healthIcon = d.board_health === "green" ? "🟢" : d.board_health === "amber" ? "🟡" : d.board_health === "red" ? "🔴" : "⚪";
+                return (
+                <div style={{ fontSize: 12, color: "#374151", lineHeight: 1.6 }}>
+                  {/* Board info bar */}
+                  <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: "6px 10px", background: "#f9fafb", borderRadius: 6 }}>
+                    <strong style={{ color: "#111827" }}>{d.board_name}</strong> · {d.total_cards} cards
+                  </div>
+
+                  {/* Agile Score + Health */}
+                  <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+                    <div style={{
+                      flex: 1, background: healthBg, borderRadius: 8, padding: "10px 12px",
+                      borderLeft: `3px solid ${healthColor}`,
+                    }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: healthColor, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                        {healthIcon} Board Health
+                      </div>
+                      <div style={{ fontSize: 12, lineHeight: 1.5 }}>{d.health_summary}</div>
+                    </div>
+                  </div>
+
+                  {d.agile_score != null && (
+                    <div style={{
+                      display: "flex", alignItems: "center", gap: 10, marginBottom: 14,
+                      padding: "10px 12px", background: "#f9fafb", borderRadius: 8,
+                    }}>
+                      <div style={{
+                        width: 44, height: 44, borderRadius: "50%",
+                        background: d.agile_score >= 7 ? "#dcfce7" : d.agile_score >= 4 ? "#fef3c7" : "#fef2f2",
+                        border: `3px solid ${d.agile_score >= 7 ? "#15803d" : d.agile_score >= 4 ? "#d97706" : "#dc2626"}`,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 16, fontWeight: 800,
+                        color: d.agile_score >= 7 ? "#15803d" : d.agile_score >= 4 ? "#d97706" : "#dc2626",
+                      }}>{d.agile_score}</div>
+                      <div>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.06em" }}>Agile Score</div>
+                        <div style={{ fontSize: 11, color: "#6b7280" }}>
+                          {d.agile_score >= 8 ? "Excellent" : d.agile_score >= 6 ? "Good" : d.agile_score >= 4 ? "Needs Improvement" : "Critical"} / 10
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* WIP Analysis */}
+                  {d.wip_analysis && (
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ fontWeight: 700, fontSize: 10, color: "#111827", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>WIP Analysis</div>
+                      <div style={{ background: "#eff6ff", borderRadius: 6, padding: "8px 10px", fontSize: 12, borderLeft: "3px solid #3b82f6", lineHeight: 1.5 }}>
+                        {d.wip_analysis}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Column Distribution */}
+                  {d.column_distribution && (
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ fontWeight: 700, fontSize: 10, color: "#111827", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Column Distribution</div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {Object.entries(d.column_distribution).map(([col, count]) => (
+                          <span key={col} style={{
+                            fontSize: 11, padding: "3px 8px", borderRadius: 4,
+                            background:  "#f3f4f6", color: "#374151", fontWeight: 600,
+                          }}>{col}: {count}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Bottlenecks */}
+                  {d.bottlenecks?.length > 0 && (
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ fontWeight: 700, fontSize: 10, color: "#d97706", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>⚠ Bottlenecks</div>
+                      <ul style={{ margin: 0, paddingLeft: 14 }}>
+                        {d.bottlenecks.map((b, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{b}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Risks */}
+                  {d.risks?.length > 0 && (
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ fontWeight: 700, fontSize: 10, color: "#dc2626", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>Risks</div>
+                      <ul style={{ margin: 0, paddingLeft: 14 }}>
+                        {d.risks.map((r, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{r}</li>)}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Recommendations */}
+                  {d.recommendations?.length > 0 && (
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 10, color: "#15803d", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>Recommendations</div>
+                      <ul style={{ margin: 0, paddingLeft: 14 }}>
+                        {d.recommendations.map((r, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{r}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+                );
+              })() : (
+                <div style={{ textAlign: "center", padding: "40px 0", color: "#9ca3af", fontSize: 12 }}>
+                  Click <strong>AI Insights</strong> to analyze your board's agile health.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        </div>
       )}
 
       {/* ── Add Column Modal ── */}
       {showAddCol && (
-        <div onClick={() => setShowAddCol(false)} style={{
+        <div onMouseDown={(e) => { if (e.target === e.currentTarget) setShowAddCol(false); }} style={{
           position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
         }}>
-          <div onClick={(e) => e.stopPropagation()}>
+          <div onMouseDown={(e) => e.stopPropagation()}>
             <div className="form">
               <h3>Add Column</h3>
               <label>
@@ -533,24 +930,26 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
 
       {/* ── Add Card Modal ── */}
       {addCardColId && (
-        <div onClick={() => setAddCardColId(null)} style={{
+        <div onMouseDown={(e) => { if (e.target === e.currentTarget) setAddCardColId(null); }} style={{
           position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
         }}>
-          <div onClick={(e) => e.stopPropagation()}>
-            <div className="form">
+          <div onMouseDown={(e) => e.stopPropagation()}>
+            <div className="form" style={{ minWidth: 420 }}>
               <h3>Add Card</h3>
 
-              <label>Source</label>
+              {/* Link to toggle — always visible at top */}
+              <label style={{ marginBottom: 4 }}>Link to</label>
               <div style={{ display: "flex", marginBottom: 16, borderRadius: 8, overflow: "hidden", border: "1px solid #e5e7eb" }}>
                 {[
-                  { key: "manual", label: "Manual" },
-                  { key: "ticket", label: "From JIRA / ADO" },
+                  { key: "internal", label: "Internal" },
+                  { key: "jira", label: "JIRA" },
+                  { key: "ado", label: "ADO" },
                 ].map((m) => (
-                  <button key={m.key} type="button" onClick={() => { setAddCardMode(m.key); setTicketLookup(null); setTicketError(""); if (m.key === "manual") setNewCardTitle(""); }}
+                  <button key={m.key} type="button" onClick={() => { setAddCardMode(m.key); setTicketLookup(null); setTicketError(""); setTicketKey(""); setNewCardDesc(""); setNewCardAssignee(""); }}
                     style={{
                       flex: 1, padding: "9px 0", border: "none", cursor: "pointer",
-                      background: addCardMode === m.key ? "#1d4ed8" : "#f9fafb",
+                      background: addCardMode === m.key ? (m.key === "internal" ? "#374151" : m.key === "jira" ? "#1d4ed8" : "#b45309") : "#f9fafb",
                       color: addCardMode === m.key ? "#fff" : "#6b7280",
                       fontWeight: 700, fontSize: 13, transition: "all 0.15s",
                     }}
@@ -558,30 +957,51 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                 ))}
               </div>
 
-              {addCardMode === "ticket" && (
+              {/* Title — always visible */}
+              <label>
+                Title <span style={{ color: "#dc2626" }}>*</span>
+                <input value={newCardTitle} onChange={(e) => setNewCardTitle(e.target.value)}
+                  autoFocus placeholder="Card title" readOnly={addCardMode !== "internal" && !!ticketLookup}
+                  style={addCardMode !== "internal" && ticketLookup ? { background: "#f9fafb", color: "#6b7280" } : {}} />
+              </label>
+
+              {/* ── Internal mode fields ── */}
+              {addCardMode === "internal" && (
                 <>
-                  <label>Ticket System</label>
-                  <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                    {["jira", "ado"].map((s) => (
-                      <button key={s} type="button" onClick={() => { setTicketSource(s); setTicketLookup(null); setTicketError(""); }}
-                        style={{
-                          flex: 1, padding: "8px 0", borderRadius: 6, cursor: "pointer",
-                          border: ticketSource === s ? "2px solid #1d4ed8" : "1px solid #d1d5db",
-                          background: ticketSource === s ? "#eff6ff" : "#fff",
-                          color: ticketSource === s ? "#1d4ed8" : "#6b7280",
-                          fontWeight: 700, fontSize: 13,
-                        }}
-                      >{s.toUpperCase()}</button>
-                    ))}
-                  </div>
                   <label>
-                    {ticketSource === "jira" ? "Issue Key" : "ADO Work Item (US only)"}
+                    Description
+                  </label>
+                  <textarea value={newCardDesc} onChange={(e) => setNewCardDesc(e.target.value)}
+                    placeholder="Optional description"
+                    rows={3}
+                    style={{
+                      width: "100%", boxSizing: "border-box", resize: "vertical", minHeight: 60,
+                      fontFamily: "inherit", fontSize: 13, padding: "10px 12px",
+                      border: "1px solid #d1d5db", borderRadius: 8, outline: "none",
+                      marginBottom: 4,
+                    }}
+                    onFocus={(e) => e.target.style.borderColor = "#1d4ed8"}
+                    onBlur={(e) => e.target.style.borderColor = "#d1d5db"}
+                  />
+                  <label>
+                    Assignee
+                    <input value={newCardAssignee} onChange={(e) => setNewCardAssignee(e.target.value)}
+                      placeholder="Who is assigned?" />
+                  </label>
+                </>
+              )}
+
+              {/* ── JIRA / ADO mode ── */}
+              {(addCardMode === "jira" || addCardMode === "ado") && (
+                <>
+                  {/* Lookup input */}
+                  <label>
+                    {addCardMode === "jira" ? "Issue Key" : "ADO Work Item ID"}
                     <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
                       <input value={ticketKey}
-                        onChange={(e) => setTicketKey(ticketSource === "jira" ? e.target.value.toUpperCase() : e.target.value)}
+                        onChange={(e) => setTicketKey(addCardMode === "jira" ? e.target.value.toUpperCase() : e.target.value)}
                         onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); lookupTicket(); } }}
-                        autoFocus
-                        placeholder={ticketSource === "jira" ? "PROJ-123" : "US-12345 or 12345"}
+                        placeholder={addCardMode === "jira" ? "PROJ-123" : "12345"}
                         style={{ flex: 1 }} />
                       <button type="button" onClick={lookupTicket} disabled={!ticketKey.trim() || ticketLoading}
                         style={{
@@ -592,49 +1012,124 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                         }}>{ticketLoading ? "Searching..." : "Lookup"}</button>
                     </div>
                   </label>
+
+                  {/* Lookup error */}
                   {ticketError && (
-                    <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", marginTop: 8, marginBottom: 4, fontSize: 12, color: "#dc2626" }}>
+                    <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "8px 12px", marginTop: 8, fontSize: 12, color: "#dc2626" }}>
                       {ticketError}
                     </div>
                   )}
-                  {ticketLookup && (
-                    <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "10px 12px", marginTop: 8, marginBottom: 4 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, background: ticketSource === "jira" ? "#dbeafe" : "#fef3c7", color: ticketSource === "jira" ? "#1d4ed8" : "#92400e", borderRadius: 3, padding: "1px 5px" }}>
-                          {ticketSource.toUpperCase()} {ticketLookup.issue_key}
+
+                  {/* Ticket preview card — shown after lookup */}
+                  {ticketLookup && (() => {
+                    const src = ticketLookup.source || addCardMode;
+                    const isJira = src === "jira";
+                    const badgeBg = isJira ? "#dbeafe" : "#fef3c7";
+                    const badgeColor = isJira ? "#1d4ed8" : "#92400e";
+                    const badgeLabel = isJira ? "JIRA" : "ADO";
+                    const badgeIcon = isJira
+                      ? <svg width="12" height="12" viewBox="0 0 24 24" fill={badgeColor}><path d="M12.005 2c-5.52 0-10 4.48-10 10s4.48 10 10 10 10-4.48 10-10-4.48-10-10-10zm0 3.6v2.9h5.4v2.5h-5.4v2.85L7.605 10l4.4-4.4z"/></svg>
+                      : <svg width="12" height="12" viewBox="0 0 24 24" fill={badgeColor}><path d="M22 4v9.4L17.6 18l-6.1-2.1v4.6L7.4 16l12.2-1V4H22zM2 7.8l4.5-2.2L18 4v16l-11.5-2L2 15.6V7.8z"/></svg>;
+                    const extStatus = (ticketLookup.status || "").toLowerCase();
+                    const matchedCol = columns.find((c) => c.name.toLowerCase() === extStatus);
+                    const targetColName = matchedCol ? matchedCol.name : (columns[0]?.name || "first column");
+                    const ticketLink = `${ticketLookup.issue_key}: ${ticketLookup.summary}`;
+                    return (
+                    <div style={{
+                      marginTop: 12, border: "1px solid #e5e7eb", borderRadius: 10,
+                      overflow: "hidden", background: "#fff",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.06)",
+                    }}>
+                      {/* Header: badge + ticket link */}
+                      <div style={{
+                        display: "flex", alignItems: "center", gap: 8,
+                        padding: "10px 12px", background: "#f9fafb", borderBottom: "1px solid #f3f4f6",
+                      }}>
+                        <span style={{
+                          display: "inline-flex", alignItems: "center", gap: 5,
+                          fontSize: 11, fontWeight: 700, letterSpacing: 0.3,
+                          background: badgeBg, color: badgeColor,
+                          borderRadius: 4, padding: "3px 8px", flexShrink: 0,
+                        }}>
+                          {badgeIcon}
+                          {badgeLabel}
                         </span>
-                        {ticketLookup.issue_type && <span style={{ fontSize: 11, color: "#6b7280" }}>{ticketLookup.issue_type}</span>}
+                        {ticketLookup.external_url ? (
+                          <a href={ticketLookup.external_url} target="_blank" rel="noopener noreferrer"
+                            style={{
+                              fontSize: 13, fontWeight: 600, color: "#1d4ed8",
+                              textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 4,
+                              lineHeight: 1.4, overflow: "hidden", textOverflow: "ellipsis",
+                            }}
+                            onMouseEnter={(e) => e.currentTarget.style.textDecoration = "underline"}
+                            onMouseLeave={(e) => e.currentTarget.style.textDecoration = "none"}
+                          >
+                            {ticketLink}
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                            </svg>
+                          </a>
+                        ) : (
+                          <span style={{ fontSize: 13, fontWeight: 600, color: "#374151", lineHeight: 1.4 }}>{ticketLink}</span>
+                        )}
                       </div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "#111827" }}>{ticketLookup.summary}</div>
-                      <div style={{ display: "flex", gap: 12, marginTop: 4, fontSize: 11, color: "#6b7280" }}>
-                        {ticketLookup.status && <span>Status: {ticketLookup.status}</span>}
-                        {ticketLookup.assignee && <span>Assignee: {ticketLookup.assignee}</span>}
+
+                      {/* Body: description, type, status, assignee */}
+                      <div style={{ padding: "10px 12px" }}>
+                        {ticketLookup.description && (
+                          <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 8, lineHeight: 1.5, maxHeight: 60, overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {ticketLookup.description}
+                          </div>
+                        )}
+                        {ticketLookup.issue_type && (
+                          <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 8 }}>
+                            Type: {ticketLookup.issue_type}
+                          </div>
+                        )}
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                          {ticketLookup.status && (
+                            <span style={{
+                              fontSize: 10, fontWeight: 700, color: "#6b7280",
+                              background: "#f3f4f6", borderRadius: 4, padding: "3px 8px",
+                              textTransform: "uppercase", letterSpacing: 0.3,
+                            }}>{ticketLookup.status}</span>
+                          )}
+                          {ticketLookup.assignee && (
+                            <span style={{
+                              fontSize: 11, color: "#6b7280", display: "inline-flex",
+                              alignItems: "center", gap: 4,
+                            }}>
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                              </svg>
+                              {ticketLookup.assignee}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ marginTop: 8, fontSize: 11, color: "#6b7280", fontStyle: "italic" }}>
+                          → Will be placed in <strong>{targetColName}</strong>
+                          {!matchedCol && ticketLookup.status ? ` (no column matches "${ticketLookup.status}")` : ""}
+                        </div>
                       </div>
                     </div>
-                  )}
+                    );
+                  })()}
                 </>
               )}
 
-              <label>
-                Card Title {addCardMode === "ticket" ? "(auto-filled from ticket)" : "*"}
-                <input value={newCardTitle} onChange={(e) => setNewCardTitle(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && newCardTitle.trim()) addCard(); }}
-                  autoFocus={addCardMode === "manual"}
-                  placeholder="Card title" />
-              </label>
-
-              <div className="actions">
+              {/* Actions */}
+              <div className="actions" style={{ marginTop: 16 }}>
                 <button type="button" onClick={() => setAddCardColId(null)} style={{
                   padding: "10px 20px", borderRadius: 8, border: "1px solid #d1d5db",
                   background: "white", cursor: "pointer", fontWeight: 500, fontSize: 14, color: "#374151",
                 }}>Cancel</button>
                 <button onClick={addCard}
-                  disabled={!newCardTitle.trim() || (addCardMode === "ticket" && !ticketLookup)}
+                  disabled={!newCardTitle.trim() || (addCardMode !== "internal" && !ticketLookup)}
                   style={{
                     padding: "10px 20px", borderRadius: 8, border: "none",
-                    background: (newCardTitle.trim() && (addCardMode === "manual" || ticketLookup)) ? "#1d4ed8" : "#93c5fd",
+                    background: (newCardTitle.trim() && (addCardMode === "internal" || ticketLookup)) ? "#1d4ed8" : "#93c5fd",
                     color: "#fff",
-                    cursor: (newCardTitle.trim() && (addCardMode === "manual" || ticketLookup)) ? "pointer" : "not-allowed",
+                    cursor: (newCardTitle.trim() && (addCardMode === "internal" || ticketLookup)) ? "pointer" : "not-allowed",
                     fontWeight: 700, fontSize: 14,
                   }}>Add Card</button>
               </div>
@@ -645,11 +1140,11 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
 
       {/* ── Edit Column Modal ── */}
       {editCol && (
-        <div onClick={() => setEditCol(null)} style={{
+        <div onMouseDown={(e) => { if (e.target === e.currentTarget) setEditCol(null); }} style={{
           position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
         }}>
-          <div onClick={(e) => e.stopPropagation()}>
+          <div onMouseDown={(e) => e.stopPropagation()}>
             <div className="form">
               <h3>Edit Column</h3>
               <label>
@@ -686,11 +1181,11 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
 
       {/* ── Edit Card Modal ── */}
       {editCard && (
-        <div onClick={() => setEditCard(null)} style={{
+        <div onMouseDown={(e) => { if (e.target === e.currentTarget) setEditCard(null); }} style={{
           position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
         }}>
-          <div onClick={(e) => e.stopPropagation()}>
+          <div onMouseDown={(e) => e.stopPropagation()}>
             <div className="form">
               <h3>Edit Card</h3>
               <label>
@@ -724,6 +1219,140 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
           </div>
         </div>
       )}
+
+      {/* ── Card Detail Modal (double-click) ── */}
+      {viewCard && (() => {
+        const card = viewCard;
+        const isExternal = !!card.issue_key;
+        const sourceLabel = !isExternal ? "Internal" : card.ticket_source === "ado" ? "ADO" : "JIRA";
+        const sourceBg = !isExternal ? "#e5e7eb" : card.ticket_source === "ado" ? "#fef3c7" : "#dbeafe";
+        const sourceColor = !isExternal ? "#6b7280" : card.ticket_source === "ado" ? "#92400e" : "#1d4ed8";
+        const statusTone = card.external_status ? getStatusTone(card.external_status) : null;
+        const toneColors = {
+          done: { bg: "#dcfce7", color: "#15803d" },
+          "in-progress": { bg: "#fff7ed", color: "#ea7a12" },
+          blocked: { bg: "#fef2f2", color: "#dc2626" },
+          todo: { bg: "#f1f5f9", color: "#64748b" },
+          design: { bg: "#fefce8", color: "#a16207" },
+          ready: { bg: "#fefce8", color: "#a16207" },
+          icebox: { bg: "#fef2f2", color: "#dc2626" },
+          unknown: { bg: "#f3f4f6", color: "#6b7280" },
+        };
+        const sc = toneColors[statusTone] || toneColors.unknown;
+        const colObj = columns.find((c) => c.id === card.column_id);
+        return (
+        <div onMouseDown={(e) => { if (e.target === e.currentTarget) setViewCard(null); }} style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
+        }}>
+          <div onMouseDown={(e) => e.stopPropagation()} style={{
+            background: "#fff", borderRadius: 14, width: 480, maxWidth: "92vw",
+            maxHeight: "85vh", overflow: "auto",
+            boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+            borderTop: `4px solid ${card.color || "#1f6688"}`,
+          }}>
+            {/* Header */}
+            <div style={{ padding: "20px 24px 12px", display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+              <div style={{ flex: 1 }}>
+                <span style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  fontSize: 11, fontWeight: 700, letterSpacing: 0.3,
+                  background: sourceBg, color: sourceColor,
+                  borderRadius: 4, padding: "3px 8px", marginBottom: 8,
+                }}>{sourceLabel}</span>
+                <h2 style={{ margin: "8px 0 0", fontSize: 18, fontWeight: 700, color: "#111827", lineHeight: 1.4 }}>{card.title}</h2>
+              </div>
+              <button onClick={() => setViewCard(null)} style={{
+                background: "none", border: "none", cursor: "pointer",
+                fontSize: 22, color: "#9ca3af", padding: "0 0 0 12px", lineHeight: 1,
+              }}>&times;</button>
+            </div>
+
+            {/* External link */}
+            {isExternal && (
+              <div style={{ padding: "0 24px 12px" }}>
+                <a href={card.external_url || "#"} target="_blank" rel="noopener noreferrer"
+                  onClick={(e) => { if (!card.external_url) e.preventDefault(); }}
+                  style={{
+                    fontSize: 13, fontWeight: 600, color: "#1d4ed8",
+                    textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 5,
+                  }}
+                  onMouseEnter={(e) => { if (card.external_url) e.currentTarget.style.textDecoration = "underline"; }}
+                  onMouseLeave={(e) => e.currentTarget.style.textDecoration = "none"}
+                >
+                  {card.issue_key}: {card.external_title || card.title}
+                  {card.external_url && (
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#1d4ed8" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+                    </svg>
+                  )}
+                </a>
+              </div>
+            )}
+
+            {/* Description */}
+            {card.description && (
+              <div style={{ padding: "0 24px 16px" }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Description</div>
+                <div style={{ fontSize: 13, color: "#374151", lineHeight: 1.6, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{card.description}</div>
+              </div>
+            )}
+
+            {/* Details grid */}
+            <div style={{ padding: "0 24px 20px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px 20px" }}>
+              {card.external_status && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>Status</div>
+                  <span style={{
+                    fontSize: 12, fontWeight: 700, color: sc.color,
+                    background: sc.bg, borderRadius: 4, padding: "4px 10px",
+                    textTransform: "uppercase", letterSpacing: 0.3,
+                  }}>{card.external_status}</span>
+                </div>
+              )}
+              {card.assignee && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>Assignee</div>
+                  <span style={{ fontSize: 13, color: "#374151", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>
+                    </svg>
+                    {card.assignee}
+                  </span>
+                </div>
+              )}
+              {colObj && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>Column</div>
+                  <span style={{ fontSize: 13, color: "#374151", display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <div style={{ width: 8, height: 8, borderRadius: 2, background: colObj.color }} />
+                    {colObj.name}
+                  </span>
+                </div>
+              )}
+              {card.ticket_source && isExternal && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>Source</div>
+                  <span style={{ fontSize: 13, color: "#374151" }}>{card.ticket_source.toUpperCase()}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Footer actions */}
+            <div style={{ padding: "12px 24px 20px", borderTop: "1px solid #f3f4f6", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button onClick={() => { setViewCard(null); setEditCard({ ...card }); }} style={{
+                padding: "8px 18px", borderRadius: 8, border: "1px solid #d1d5db",
+                background: "#fff", cursor: "pointer", fontWeight: 600, fontSize: 13, color: "#374151",
+              }}>Edit</button>
+              <button onClick={() => setViewCard(null)} style={{
+                padding: "8px 18px", borderRadius: 8, border: "none",
+                background: "#1d4ed8", color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 13,
+              }}>Close</button>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
 
       {/* ── Confirm dialog ── */}
       {confirmDialog && (

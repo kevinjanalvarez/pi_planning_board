@@ -418,6 +418,7 @@ export default function App() {
   const [pendingNotice, setPendingNotice] = useState("");
   const [pendingCount, setPendingCount] = useState(0);
   const [integrationWarnings, setIntegrationWarnings] = useState(null); // { jira?: {status,message}, ado?: {status,message} }
+  const [noIntegrations, setNoIntegrations] = useState(false);
 
   // ── App state (must be declared before any early return to satisfy Rules of Hooks) ──
   const [view, setView] = useState("dashboard");
@@ -510,7 +511,7 @@ export default function App() {
 
   // ── Background integration health check ──
   useEffect(() => {
-    if (!auth?.token) { setIntegrationWarnings(null); return; }
+    if (!auth?.token) { setIntegrationWarnings(null); setNoIntegrations(false); return; }
     (async () => {
       try {
         const res = await fetch(`${API_BASE}/api/credentials/health`, {
@@ -518,8 +519,15 @@ export default function App() {
         });
         if (!res.ok) return;
         const data = await res.json();
+        const results = data.results || {};
+        if (Object.keys(results).length === 0) {
+          setNoIntegrations(true);
+          setIntegrationWarnings(null);
+          return;
+        }
+        setNoIntegrations(false);
         const failed = {};
-        for (const [provider, result] of Object.entries(data.results || {})) {
+        for (const [provider, result] of Object.entries(results)) {
           if (result.status === "failed") failed[provider] = result;
         }
         setIntegrationWarnings(Object.keys(failed).length > 0 ? failed : null);
@@ -1747,6 +1755,8 @@ export default function App() {
         onIntegrations={() => setView("integrations")}
         pendingCount={pendingCount}
         integrationWarnings={integrationWarnings}
+        noIntegrations={noIntegrations}
+        onDismissNoIntegrations={() => setNoIntegrations(false)}
       />
     );
   }
@@ -2944,13 +2954,13 @@ export default function App() {
 
       {menu?.type === "milestone" ? (
         <div
-          onClick={() => setMenu(null)}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setMenu(null); }}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onClick={(e) => e.stopPropagation()}>
+          <div onMouseDown={(e) => e.stopPropagation()}>
           <form onSubmit={createMilestone} className="form">
             <h3>Add IDEA Milestone</h3>
             <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 4 }}>
@@ -3036,13 +3046,13 @@ export default function App() {
 
       {menu?.type === "team" ? (
         <div
-          onClick={() => setMenu(null)}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setMenu(null); }}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onClick={(e) => e.stopPropagation()}>
+          <div onMouseDown={(e) => e.stopPropagation()}>
           <form onSubmit={saveTeamAssignment} className="form">
             <h3>Assign Team</h3>
             <label>
@@ -3144,13 +3154,13 @@ export default function App() {
 
       {menu?.type === "task" ? (
         <div
-          onClick={() => setMenu(null)}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setMenu(null); }}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onClick={(e) => e.stopPropagation()}>
+          <div onMouseDown={(e) => e.stopPropagation()}>
           <form onSubmit={createTask} className="form">
             <h3>Add Task</h3>
             <label>Source</label>
@@ -3355,13 +3365,13 @@ export default function App() {
 
       {menu?.type === "team-required" ? (
         <div
-          onClick={() => setMenu(null)}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setMenu(null); }}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onClick={(e) => e.stopPropagation()} style={{
+          <div onMouseDown={(e) => e.stopPropagation()} style={{
             background: "white", borderRadius: "16px", padding: "28px 32px",
             boxShadow: "0 20px 60px rgba(0,0,0,0.25)", minWidth: "300px", textAlign: "center",
           }}>

@@ -628,13 +628,13 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
       {/* Create / Edit Modal */}
       {showModal && (
         <div
-          onClick={() => setShowModal(false)}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setShowModal(false); }}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onClick={(e) => e.stopPropagation()} style={{
+          <div onMouseDown={(e) => e.stopPropagation()} style={{
             background: "#fff", borderRadius: 16, padding: "32px 36px", width: 480,
             boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
           }}>

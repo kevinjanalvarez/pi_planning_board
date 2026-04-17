@@ -901,7 +901,7 @@ app = FastAPI(title="Program Planning Board API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("CORS_ORIGIN", "http://localhost:5173")],
+    allow_origins=[os.getenv("CORS_ORIGIN", "http://localhost:3000")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1055,6 +1055,8 @@ def get_board(board_id: int = Query(...), refresh_external: bool = Query(False),
     board_meta = fetch_board_by_id(board_id)
     if not board_meta:
         raise HTTPException(status_code=404, detail="Board not found")
+    if user["role"] != "admin" and board_meta.get("created_by") != user["id"]:
+        raise HTTPException(status_code=403, detail="You do not have access to this board")
 
     start = date.fromisoformat(board_meta["start_date"]) if board_meta.get("start_date") else date.today().replace(day=1)
     end = date.fromisoformat(board_meta["end_date"]) if board_meta.get("end_date") else None
@@ -1762,12 +1764,45 @@ class KanbanCardRequest(BaseModel):
     issue_key: str | None = None
     ticket_source: str | None = Field(None, pattern="^(jira|ado)$")
     description: str | None = None
+    assignee: str | None = None
+    external_status: str | None = None
+    external_url: str | None = None
+    external_title: str | None = None
 
 class KanbanCardMoveRequest(BaseModel):
     column_id: int | None = None
     row_id: int | None = None
     title: str | None = None
     color: str | None = None
+
+
+@app.get("/api/kanban/ticket-lookup")
+def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Query(..., pattern="^(jira|ado)$"), user: dict = Depends(get_current_user)) -> dict:
+    """Fetch ticket info from JIRA or ADO by exact key."""
+    try:
+        if source == "jira":
+            ticket = fetch_jira_issue(key.strip(), user["id"])
+            jira_base, _, _ = _get_jira_connection_settings(user["id"])
+            external_url = f"{jira_base}/browse/{ticket['issue_key']}"
+        else:
+            ticket = fetch_ado_work_item(key.strip(), user["id"])
+            org, project, _ = _get_ado_connection_settings(user["id"])
+            external_url = f"https://dev.azure.com/{org}/{project}/_workitems/edit/{ticket['issue_key']}"
+        return {
+            "issue_key": ticket["issue_key"],
+            "summary": ticket["summary"],
+            "issue_type": ticket.get("issue_type"),
+            "status": ticket.get("status"),
+            "assignee": ticket.get("assignee"),
+            "description": ticket.get("description"),
+            "source": source,
+            "external_url": external_url,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        src_label = "JIRA" if source == "jira" else "ADO"
+        raise HTTPException(status_code=404, detail=f"Could not find {src_label} ticket '{key}'. Check the key and your integration credentials.")
 
 
 @app.get("/api/kanban/{board_id}")
@@ -1846,6 +1881,10 @@ def create_kanban_card(board_id: int, payload: KanbanCardRequest) -> dict:
         issue_key=payload.issue_key.strip() if payload.issue_key else None,
         ticket_source=payload.ticket_source,
         description=payload.description,
+        assignee=payload.assignee,
+        external_status=payload.external_status,
+        external_url=payload.external_url,
+        external_title=payload.external_title,
     )
     log_activity(board_id, "Added card", payload.title.strip()[:50])
     return card
@@ -1864,26 +1903,6 @@ def remove_kanban_card(card_id: int) -> dict:
     if not delete_kanban_card(card_id):
         raise HTTPException(status_code=404, detail="Card not found")
     return {"status": "deleted"}
-
-
-@app.get("/api/kanban/ticket-lookup")
-def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Query(..., pattern="^(jira|ado)$"), user: dict = Depends(get_current_user)) -> dict:
-    """Fetch ticket info from JIRA or ADO by exact key. No ticket creation."""
-    try:
-        if source == "jira":
-            ticket = fetch_jira_issue(key.strip(), user["id"])
-        else:
-            ticket = fetch_ado_work_item(key.strip(), user["id"])
-        return {
-            "issue_key": ticket["issue_key"],
-            "summary": ticket["summary"],
-            "issue_type": ticket.get("issue_type"),
-            "status": ticket.get("status"),
-            "assignee": ticket.get("assignee"),
-            "source": source,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Ticket not found: {e}")
 
 
 @app.get("/api/admin/users")
@@ -2032,8 +2051,11 @@ class UpdateBoardRequest(BaseModel):
 
 
 @app.get("/api/boards")
-def list_boards(include_archived: bool = Query(False)) -> dict:
-    boards = fetch_boards(include_archived=include_archived)
+def list_boards(include_archived: bool = Query(False), user: dict = Depends(get_current_user)) -> dict:
+    if user["role"] == "admin":
+        boards = fetch_boards(include_archived=include_archived)
+    else:
+        boards = fetch_boards_by_user(user["id"], include_archived=include_archived)
     return {"boards": boards, "total": len(boards)}
 
 
@@ -2056,10 +2078,12 @@ def create_board_endpoint(payload: CreateBoardRequest, user: dict = Depends(get_
 
 
 @app.get("/api/boards/{board_id}")
-def get_board_endpoint(board_id: int) -> dict:
+def get_board_endpoint(board_id: int, user: dict = Depends(get_current_user)) -> dict:
     board = fetch_board_by_id(board_id)
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
+    if user["role"] != "admin" and board.get("created_by") != user["id"]:
+        raise HTTPException(status_code=403, detail="You do not have access to this board")
     return board
 
 
@@ -2103,10 +2127,12 @@ def delete_board_endpoint(board_id: int, user: dict = Depends(get_current_user))
 
 
 @app.get("/api/boards/{board_id}/activity")
-def get_board_activity(board_id: int, limit: int = Query(50, ge=1, le=200)) -> dict:
+def get_board_activity(board_id: int, limit: int = Query(50, ge=1, le=200), user: dict = Depends(get_current_user)) -> dict:
     board = fetch_board_by_id(board_id)
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
+    if user["role"] != "admin" and board.get("created_by") != user["id"]:
+        raise HTTPException(status_code=403, detail="You do not have access to this board")
     events = fetch_activity(board_id, limit)
     return {"board_id": board_id, "events": events}
 
@@ -2116,6 +2142,8 @@ def clone_board_endpoint(board_id: int, user: dict = Depends(get_current_user)) 
     src = fetch_board_by_id(board_id)
     if not src:
         raise HTTPException(status_code=404, detail="Board not found")
+    if user["role"] != "admin" and src.get("created_by") != user["id"]:
+        raise HTTPException(status_code=403, detail="You do not have access to this board")
     new_board = insert_board(
         name=f"Copy of {src['name']}",
         description=src.get("description"),
@@ -2175,20 +2203,36 @@ def save_credential(provider: str, body: CredentialRequest, user: dict = Depends
         raise HTTPException(status_code=400, detail="Provider in URL and body must match")
 
     import json as _json
+
+    # Merge with stored credential when password/PAT not provided (edit mode)
+    stored_decrypted = {}
+    if (provider == "jira" and not body.password) or (provider == "ado" and not body.pat):
+        stored = fetch_credential(user["id"], provider)
+        if stored:
+            try:
+                stored_decrypted = _json.loads(_fernet.decrypt(stored["encrypted_data"].encode()).decode())
+            except Exception:
+                pass
+
     if provider == "jira":
-        if not body.email or not body.password:
+        email = body.email or stored_decrypted.get("email", "")
+        password = body.password or stored_decrypted.get("password", "")
+        jira_url = body.jira_url or stored_decrypted.get("jira_url", "")
+        if not email or not password:
             raise HTTPException(status_code=400, detail="Jira requires email and password")
         secret_payload = _json.dumps({
-            "email": body.email,
-            "password": body.password,
-            "jira_url": body.jira_url or "",
+            "email": email,
+            "password": password,
+            "jira_url": jira_url,
         })
     else:
-        if not body.pat:
+        pat = body.pat or stored_decrypted.get("pat", "")
+        ado_org = body.ado_org or stored_decrypted.get("ado_org", "")
+        if not pat:
             raise HTTPException(status_code=400, detail="Azure DevOps requires a PAT")
         secret_payload = _json.dumps({
-            "pat": body.pat,
-            "ado_org": body.ado_org or "",
+            "pat": pat,
+            "ado_org": ado_org,
         })
 
     encrypted = _fernet.encrypt(secret_payload.encode()).decode()
@@ -2260,16 +2304,39 @@ def test_credential(provider: str, body: CredentialRequest, user: dict = Depends
     if provider not in ("jira", "ado"):
         raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
 
+    # Fall back to stored credentials when password/PAT not provided (edit mode)
+    import json as _json
+    email = body.email or ""
+    password = body.password or ""
+    pat = body.pat or ""
+    ado_org = body.ado_org or ""
+    jira_url = body.jira_url or ""
+
+    if (provider == "jira" and not password) or (provider == "ado" and not pat):
+        stored = fetch_credential(user["id"], provider)
+        if stored:
+            try:
+                decrypted = _json.loads(_fernet.decrypt(stored["encrypted_data"].encode()).decode())
+                if provider == "jira":
+                    password = password or decrypted.get("password", "")
+                    email = email or decrypted.get("email", "")
+                    jira_url = jira_url or decrypted.get("jira_url", "")
+                else:
+                    pat = pat or decrypted.get("pat", "")
+                    ado_org = ado_org or decrypted.get("ado_org", "")
+            except Exception:
+                return {"status": "failed", "message": "Could not decrypt stored credential"}
+
     if provider == "jira":
-        if not body.email or not body.password:
+        if not email or not password:
             raise HTTPException(status_code=400, detail="Jira requires email and password")
-        jira_url = (body.jira_url or os.getenv("JIRA_URL", "")).rstrip("/")
+        jira_url = (jira_url or os.getenv("JIRA_URL", "")).rstrip("/")
         if not jira_url:
             raise HTTPException(status_code=400, detail="Jira URL is required")
         try:
             resp = requests.get(
                 f"{jira_url}/rest/api/2/myself",
-                auth=(body.email, body.password),
+                auth=(email, password),
                 verify=_jira_ssl_verify(),
                 timeout=15,
             )
@@ -2278,19 +2345,21 @@ def test_credential(provider: str, body: CredentialRequest, user: dict = Depends
                 return {"status": "success", "message": f"Connected as {data.get('displayName', data.get('emailAddress', 'OK'))}"}
             else:
                 return {"status": "failed", "message": f"Jira returned HTTP {resp.status_code}"}
+        except UnicodeEncodeError:
+            return {"status": "failed", "message": "Password contains invalid characters — please re-enter it"}
         except requests.RequestException as exc:
             return {"status": "failed", "message": str(exc)}
 
     else:  # ado
-        if not body.pat:
+        if not pat:
             raise HTTPException(status_code=400, detail="Azure DevOps requires a PAT")
-        ado_org = body.ado_org or os.getenv("ADO_ORG", "")
+        ado_org = ado_org or os.getenv("ADO_ORG", "")
         if not ado_org:
             raise HTTPException(status_code=400, detail="Azure DevOps organization is required")
         try:
             resp = requests.get(
                 f"https://dev.azure.com/{ado_org}/_apis/projects?api-version=7.0",
-                auth=("", body.pat),
+                auth=("", pat),
                 timeout=15,
             )
             if resp.status_code == 200:
@@ -2475,4 +2544,100 @@ def board_insights(board_id: int, user: dict = Depends(get_current_user)) -> dic
     result = _call_llm(prompt)
     result["board_name"] = board.get("name", "")
     result["milestone_count"] = len(milestones_ctx)
+    return result
+
+
+# ── Kanban Board AI Insights ────────────────────────────────────────────
+
+@app.post("/api/kanban/{board_id}/insights")
+def kanban_board_insights(board_id: int, user: dict = Depends(get_current_user)) -> dict:
+    board = fetch_board_by_id(board_id)
+    if not board:
+        raise HTTPException(status_code=404, detail="Board not found")
+    if board.get("board_type") != "kanban":
+        raise HTTPException(status_code=400, detail="Not a kanban board")
+
+    columns = fetch_kanban_columns(board_id)
+    rows = fetch_kanban_rows(board_id)
+    cards = fetch_kanban_cards(board_id)
+
+    if not cards:
+        raise HTTPException(status_code=400, detail="No cards on this board yet")
+
+    # Build column distribution
+    col_map = {c["id"]: c["name"] for c in columns}
+    col_card_counts = {}
+    for c in columns:
+        col_card_counts[c["name"]] = 0
+    for card in cards:
+        col_name = col_map.get(card["column_id"], "Unknown")
+        col_card_counts[col_name] = col_card_counts.get(col_name, 0) + 1
+
+    # Status breakdown
+    status_counts = {}
+    for card in cards:
+        st = card.get("external_status") or "No Status"
+        status_counts[st] = status_counts.get(st, 0) + 1
+
+    # Source breakdown
+    source_counts = {"internal": 0, "jira": 0, "ado": 0}
+    for card in cards:
+        src = card.get("ticket_source") or "internal"
+        source_counts[src] = source_counts.get(src, 0) + 1
+
+    # Assignee workload
+    assignee_counts = {}
+    for card in cards:
+        assignee = card.get("assignee") or "Unassigned"
+        assignee_counts[assignee] = assignee_counts.get(assignee, 0) + 1
+
+    # Cards detail
+    cards_detail = ""
+    for card in cards:
+        col_name = col_map.get(card["column_id"], "Unknown")
+        cards_detail += (
+            f"  - \"{card.get('title', '')}\" | Column: {col_name} "
+            f"| Status: {card.get('external_status') or 'N/A'} "
+            f"| Assignee: {card.get('assignee') or 'Unassigned'} "
+            f"| Source: {card.get('ticket_source') or 'internal'}"
+            f"{ ' | Key: ' + card['issue_key'] if card.get('issue_key') else '' }\n"
+        )
+
+    col_dist = ", ".join(f"{k}: {v}" for k, v in col_card_counts.items())
+    row_names = ", ".join(r["name"] for r in rows) if rows else "(no swimlanes)"
+
+    prompt = (
+        "You are an expert Agile Coach and Kanban practitioner. Analyze this Kanban board and provide "
+        "actionable insights based on Kanban best practices (WIP limits, flow efficiency, bottlenecks, "
+        "cycle time awareness, pull vs push, work distribution).\n\n"
+        f"Board: \"{board.get('name', 'Untitled')}\"\n"
+        f"Columns: {', '.join(c['name'] for c in columns)}\n"
+        f"Swimlanes: {row_names}\n"
+        f"Total Cards: {len(cards)}\n"
+        f"Column Distribution: {col_dist}\n"
+        f"Status Breakdown: {', '.join(f'{k}: {v}' for k, v in status_counts.items())}\n"
+        f"Source Mix: Internal: {source_counts['internal']}, JIRA: {source_counts['jira']}, ADO: {source_counts['ado']}\n"
+        f"Assignee Workload: {', '.join(f'{k}: {v}' for k, v in assignee_counts.items())}\n"
+        f"Today: {date.today().isoformat()}\n\n"
+        f"Cards:\n{cards_detail}\n"
+        "Provide analysis in exactly this JSON format (no markdown, no code fences):\n"
+        '{\n'
+        '  "board_health": "green|amber|red",\n'
+        '  "health_summary": "2-3 sentence Kanban board health assessment covering flow, WIP, and bottlenecks",\n'
+        '  "wip_analysis": "1-2 sentence analysis of work-in-progress distribution across columns",\n'
+        '  "bottlenecks": ["bottleneck observation 1", "bottleneck observation 2"],\n'
+        '  "risks": ["risk 1", "risk 2", "risk 3"],\n'
+        '  "recommendations": ["actionable recommendation 1", "actionable recommendation 2", "actionable recommendation 3"],\n'
+        '  "agile_score": 1-10\n'
+        '}\n'
+        "Keep each item brief (1 sentence). Focus on real Kanban metrics and actionable agile improvements. "
+        "agile_score is 1 (poor) to 10 (excellent) based on Kanban best practices adherence."
+    )
+
+    result = _call_llm(prompt)
+    result["board_name"] = board.get("name", "")
+    result["total_cards"] = len(cards)
+    result["column_distribution"] = col_card_counts
+    result["source_mix"] = source_counts
+    result["assignee_workload"] = assignee_counts
     return result

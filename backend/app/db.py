@@ -243,7 +243,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 board_id INTEGER NOT NULL,
                 column_id INTEGER NOT NULL,
-                row_id INTEGER NOT NULL,
+                row_id INTEGER,
                 title TEXT NOT NULL,
                 issue_key TEXT,
                 ticket_source TEXT,
@@ -258,6 +258,45 @@ def init_db() -> None:
             )
             """
         )
+
+        # ── kanban_cards row_id nullable migration ──
+        kc_cols = conn.execute("PRAGMA table_info(kanban_cards)").fetchall()
+        for col in kc_cols:
+            if col["name"] == "row_id" and col["notnull"] == 1:
+                conn.execute("ALTER TABLE kanban_cards RENAME TO _kanban_cards_old")
+                conn.execute("""
+                    CREATE TABLE kanban_cards (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        board_id INTEGER NOT NULL,
+                        column_id INTEGER NOT NULL,
+                        row_id INTEGER,
+                        title TEXT NOT NULL,
+                        issue_key TEXT,
+                        ticket_source TEXT,
+                        description TEXT,
+                        color TEXT DEFAULT '#1f6688',
+                        position INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (board_id) REFERENCES boards(id),
+                        FOREIGN KEY (column_id) REFERENCES kanban_columns(id),
+                        FOREIGN KEY (row_id) REFERENCES kanban_rows(id)
+                    )
+                """)
+                conn.execute("INSERT INTO kanban_cards SELECT * FROM _kanban_cards_old")
+                conn.execute("DROP TABLE _kanban_cards_old")
+                break
+
+        # ── kanban_cards source-aware columns migration ──
+        kc_col_names = [c["name"] for c in conn.execute("PRAGMA table_info(kanban_cards)").fetchall()]
+        if "assignee" not in kc_col_names:
+            conn.execute("ALTER TABLE kanban_cards ADD COLUMN assignee TEXT")
+        if "external_status" not in kc_col_names:
+            conn.execute("ALTER TABLE kanban_cards ADD COLUMN external_status TEXT")
+        if "external_url" not in kc_col_names:
+            conn.execute("ALTER TABLE kanban_cards ADD COLUMN external_url TEXT")
+        if "external_title" not in kc_col_names:
+            conn.execute("ALTER TABLE kanban_cards ADD COLUMN external_title TEXT")
 
 
 # ── User / Auth helpers ─────────────────────────────────────────────────
@@ -355,10 +394,15 @@ def fetch_users_with_board_count() -> list[dict[str, Any]]:
         return rows
 
 
-def fetch_boards_by_user(user_id: int) -> list[dict[str, Any]]:
+def fetch_boards_by_user(user_id: int, include_archived: bool = False) -> list[dict[str, Any]]:
     with get_conn() as conn:
+        if include_archived:
+            return conn.execute(
+                "SELECT * FROM boards WHERE created_by = ? ORDER BY created_at DESC",
+                (user_id,),
+            ).fetchall()
         return conn.execute(
-            "SELECT id, name, description, start_date, end_date, is_archived, created_at FROM boards WHERE created_by = ? ORDER BY created_at DESC",
+            "SELECT * FROM boards WHERE created_by = ? AND is_archived = 0 ORDER BY created_at DESC",
             (user_id,),
         ).fetchall()
 
@@ -937,7 +981,9 @@ def fetch_kanban_cards(board_id: int) -> list[dict[str, Any]]:
 
 def insert_kanban_card(board_id: int, column_id: int, row_id: int | None, title: str, color: str = "#1f6688",
                        issue_key: str | None = None, ticket_source: str | None = None,
-                       description: str | None = None) -> dict[str, Any]:
+                       description: str | None = None,
+                       assignee: str | None = None, external_status: str | None = None,
+                       external_url: str | None = None, external_title: str | None = None) -> dict[str, Any]:
     now = datetime.utcnow().isoformat()
     with get_conn() as conn:
         if row_id is not None:
@@ -951,8 +997,8 @@ def insert_kanban_card(board_id: int, column_id: int, row_id: int | None, title:
                 (board_id, column_id),
             ).fetchone()["mp"]
         cur = conn.execute(
-            "INSERT INTO kanban_cards (board_id, column_id, row_id, title, color, issue_key, ticket_source, description, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (board_id, column_id, row_id, title, color, issue_key, ticket_source, description, max_pos + 1, now, now),
+            "INSERT INTO kanban_cards (board_id, column_id, row_id, title, color, issue_key, ticket_source, description, assignee, external_status, external_url, external_title, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (board_id, column_id, row_id, title, color, issue_key, ticket_source, description, assignee, external_status, external_url, external_title, max_pos + 1, now, now),
         )
         return conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (cur.lastrowid,)).fetchone()
 

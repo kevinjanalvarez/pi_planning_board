@@ -21,7 +21,7 @@ function formatDate(dateStr) {
   });
 }
 
-export default function Dashboard({ onOpenBoard, apiFetch, currentUser, onLogout, onManageUsers, onProfile, onIntegrations, pendingCount, integrationWarnings }) {
+export default function Dashboard({ onOpenBoard, apiFetch, currentUser, onLogout, onManageUsers, onProfile, onIntegrations, pendingCount, integrationWarnings, noIntegrations, onDismissNoIntegrations }) {
   const [boards, setBoards] = useState([]);
   const [filter, setFilter] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -129,6 +129,14 @@ export default function Dashboard({ onOpenBoard, apiFetch, currentUser, onLogout
               body: JSON.stringify({ name: col.name, color: col.color }),
             });
           }
+          setShowModal(false);
+          if (onOpenBoard) onOpenBoard(created);
+          return;
+        } else if (createRes.ok) {
+          const created = await createRes.json();
+          setShowModal(false);
+          if (onOpenBoard) onOpenBoard(created);
+          return;
         }
       }
       setShowModal(false);
@@ -505,6 +513,39 @@ export default function Dashboard({ onOpenBoard, apiFetch, currentUser, onLogout
         </div>
       )}
 
+      {/* ── No integrations setup banner ── */}
+      {noIntegrations && !integrationWarnings && (
+        <div style={{
+          background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 10,
+          padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12,
+          fontSize: 13, color: "#1e40af",
+        }}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+          </svg>
+          <span>
+            <strong>No integrations configured.</strong>{" "}
+            Connect your JIRA or Azure DevOps account to pull tickets directly into your boards.
+          </span>
+          <button
+            onClick={() => onIntegrations && onIntegrations()}
+            style={{
+              marginLeft: "auto", background: "#1d4ed8", color: "#fff", border: "none",
+              borderRadius: 6, padding: "5px 14px", fontSize: 12, fontWeight: 700,
+              cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0,
+            }}
+          >Set Up Now</button>
+          <button
+            onClick={() => onDismissNoIntegrations && onDismissNoIntegrations()}
+            style={{
+              background: "none", border: "none", cursor: "pointer",
+              color: "#93c5fd", fontSize: 18, padding: "0 2px", lineHeight: 1, flexShrink: 0,
+            }}
+            title="Dismiss"
+          >×</button>
+        </div>
+      )}
+
       {/* ── Board grid ── */}
       {loading ? (
         <p style={{ color: "#9ca3af", fontSize: "14px" }}>Loading boards…</p>
@@ -793,14 +834,13 @@ export default function Dashboard({ onOpenBoard, apiFetch, currentUser, onLogout
       {/* ── Create / Edit Modal ── */}
       {showModal && (
         <div
-          onClick={() => setShowModal(false)}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setShowModal(false); }}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
           <div
-            onClick={(e) => e.stopPropagation()}
             style={{
               background: "white", borderRadius: "16px",
               padding: "32px", width: "440px",
@@ -1010,13 +1050,13 @@ export default function Dashboard({ onOpenBoard, apiFetch, currentUser, onLogout
       {/* ── Assign Owner Modal ── */}
       {assignModal && (
         <div
-          onClick={() => setAssignModal(null)}
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setAssignModal(null); }}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onClick={(e) => e.stopPropagation()} style={{
+          <div onMouseDown={(e) => e.stopPropagation()} style={{
             background: "#fff", borderRadius: 16, padding: "32px 36px", width: 400,
             boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
           }}>
