@@ -289,14 +289,12 @@ def init_db() -> None:
 
         # ── kanban_cards source-aware columns migration ──
         kc_col_names = [c["name"] for c in conn.execute("PRAGMA table_info(kanban_cards)").fetchall()]
-        if "assignee" not in kc_col_names:
-            conn.execute("ALTER TABLE kanban_cards ADD COLUMN assignee TEXT")
-        if "external_status" not in kc_col_names:
-            conn.execute("ALTER TABLE kanban_cards ADD COLUMN external_status TEXT")
-        if "external_url" not in kc_col_names:
-            conn.execute("ALTER TABLE kanban_cards ADD COLUMN external_url TEXT")
-        if "external_title" not in kc_col_names:
-            conn.execute("ALTER TABLE kanban_cards ADD COLUMN external_title TEXT")
+        for col_name in ("assignee", "external_status", "external_url", "external_title"):
+            if col_name not in kc_col_names:
+                try:
+                    conn.execute(f"ALTER TABLE kanban_cards ADD COLUMN {col_name} TEXT")
+                except Exception:
+                    pass  # column may already exist from concurrent worker
 
 
 # ── User / Auth helpers ─────────────────────────────────────────────────
