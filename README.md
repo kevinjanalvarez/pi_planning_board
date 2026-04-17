@@ -34,7 +34,8 @@ PI planning sessions are a cornerstone of the Scaled Agile Framework (SAFe), but
 | **Dashboard** | Multi-board hub — create, edit, archive, clone, delete, and assign PI Planning or Kanban boards |
 | **PI Planning board** | Interactive planning surface with monthly columns (WK1–WK4), milestone row, up to 10 team rows, drag-to-reposition, and multi-slot span |
 | **Gantt chart** | Timeline view with status-based bar coloring, today line, milestone RAG health (diamond + progress bar colored by risk), and PNG export via html2canvas |
-| **Kanban board** | Custom columns, swimlane rows, card creation (manual or from JIRA/ADO), drag-and-drop movement |
+| **Kanban board** | Custom columns, swimlane rows, card creation (manual or from JIRA/ADO), drag-and-drop movement, smart status-to-column mapping via tone map, double-click card detail modal |
+| **Kanban AI Insights** | Agile Coach LLM panel — board health (green/amber/red), agile score (1-10), WIP analysis, bottleneck detection, risks, and actionable recommendations based on Kanban best practices |
 | **Milestone RAG health** | Auto-calculated Red/Amber/Green status for milestones based on timeline progress, blocked tasks, and overdue state. PI board shows "AT RISK" / "WARNING" badge; Gantt colors the diamond, title, and progress bar |
 | **Dependency linking** | Draw `blocks`, `depends_on`, and `relates_to` links between work items across teams |
 | **JIRA integration** | Fetch issue metadata, create new JIRA tickets, lookup by key, per-user credential storage |
@@ -42,7 +43,7 @@ PI planning sessions are a cornerstone of the Scaled Agile Framework (SAFe), but
 | **Admin panel** | User CRUD, role assignment, board assignment, credential management per user |
 | **User profile** | Update display name, change password, manage personal JIRA/ADO integrations with connection testing |
 | **Activity log** | Append-only transaction history capturing every board event |
-| **AI Insights (LLM)** | Azure OpenAI-powered health analysis — per-milestone and board-wide. Docked side panel (VS Code chat style) with health summary, risks, and recommendations |
+| **AI Insights (LLM)** | Azure OpenAI-powered health analysis — per-milestone, board-wide, and Kanban agile advisor. Docked side panel (VS Code chat style) with health summary, risks, and recommendations |
 
 ---
 
@@ -291,7 +292,8 @@ cat ~/hcph_frontend.log
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/milestones/{milestone_id}/insights` | Generate LLM-powered insights for a single milestone |
-| POST | `/api/boards/{board_id}/insights` | Generate LLM-powered health summary for the entire board |
+| POST | `/api/boards/{board_id}/insights` | Generate LLM-powered health summary for the entire PI board |
+| POST | `/api/kanban/{board_id}/insights` | Generate Kanban agile advisor insights (health, WIP, bottlenecks, score) |
 
 ### Other
 | Method | Path | Description |
@@ -314,7 +316,7 @@ cat ~/hcph_frontend.log
 | `board_activity` | Board-level activity log |
 | `kanban_columns` | Kanban column definitions with color and position |
 | `kanban_rows` | Kanban swimlane rows |
-| `kanban_cards` | Kanban cards with column/row placement and optional JIRA/ADO link |
+| `kanban_cards` | Kanban cards with column/row placement, optional JIRA/ADO link, external_title, external_status, and external_url |
 | `credentials` | Fernet-encrypted JIRA/ADO credentials per user |
 
 ---
