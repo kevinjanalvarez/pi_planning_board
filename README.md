@@ -1,6 +1,6 @@
 # PI Planning Board
 
-**PI Planning Board** is an internal web tool designed and built from scratch to digitize and streamline Program Increment (PI) planning ceremonies and Kanban workflows for agile delivery teams at Home Credit Philippines. It replaces static spreadsheets and physical sticky-note boards with an interactive planning surface that integrates directly with JIRA and Azure DevOps (ADO).
+**PI Planning Board** is an internal web tool designed and built from scratch to digitize and streamline Program Increment (PI) planning ceremonies and Kanban workflows for agile delivery teams at Home Credit Philippines. It replaces static spreadsheets and physical sticky-note boards with an interactive planning surface that integrates directly with JIRA, JIRA.net (Global), and Azure DevOps (ADO).
 
 ---
 
@@ -22,7 +22,7 @@ PI planning sessions are a cornerstone of the Scaled Agile Framework (SAFe), but
 - **Frontend:** React 18 + Vite · Custom CSS · html2canvas (PNG export)
 - **Backend:** Python 3.13 · FastAPI · Uvicorn · SQLite
 - **Auth:** JWT (HS256, 12h expiry) · bcrypt password hashing · Fernet credential encryption
-- **Integrations:** On-prem JIRA REST API · Azure DevOps REST API
+- **Integrations:** On-prem JIRA REST API (jira.homecredit.ph) · JIRA.net Global REST API (jira.homecredit.net/jira) · Azure DevOps REST API
 
 ---
 
@@ -32,16 +32,18 @@ PI planning sessions are a cornerstone of the Scaled Agile Framework (SAFe), but
 |---|---|
 | **User authentication** | JWT-based login/register with role-based access (user/admin) |
 | **Dashboard** | Multi-board hub — create, edit, archive, clone, delete, and assign PI Planning or Kanban boards |
-| **PI Planning board** | Interactive planning surface with monthly columns (WK1–WK4), milestone row, up to 10 team rows, drag-to-reposition, and multi-slot span |
-| **Gantt chart** | Timeline view with status-based bar coloring, today line, milestone RAG health (diamond + progress bar colored by risk), and PNG export via html2canvas |
-| **Kanban board** | Custom columns, swimlane rows, card creation (manual or from JIRA/ADO), drag-and-drop movement, smart status-to-column mapping via tone map, double-click card detail modal |
+| **PI Planning board** | Interactive planning surface with monthly columns (WK1–WK4), milestone row, up to 10 team rows, drag-to-reposition, and multi-slot span. Supports Internal, Existing (JIRA/JIRA.net/ADO), and New task creation modes |
+| **Gantt chart** | Timeline view with status-based bar coloring, today line, milestone RAG health (diamond at end date + progress bar colored by risk), and PNG export via html2canvas |
+| **Kanban board** | Custom columns, swimlane rows, card creation (internal, JIRA, JIRA.net, or ADO), drag-and-drop movement, smart status-to-column mapping via tone map, double-click card detail modal |
 | **Kanban AI Insights** | Agile Coach LLM panel — board health (green/amber/red), agile score (1-10), WIP analysis, bottleneck detection, risks, and actionable recommendations based on Kanban best practices |
 | **Milestone RAG health** | Auto-calculated Red/Amber/Green status for milestones based on timeline progress, blocked tasks, and overdue state. PI board shows "AT RISK" / "WARNING" badge; Gantt colors the diamond, title, and progress bar |
-| **Dependency linking** | Draw `blocks`, `depends_on`, and `relates_to` links between work items across teams |
-| **JIRA integration** | Fetch issue metadata, create new JIRA tickets, lookup by key, per-user credential storage |
+| **Dependency linking** | Draw `blocks`, `depends_on`, and `relates_to` links between work items across teams. Cross-JIRA-provider links (JIRA ↔ JIRA.net) create bidirectional web links |
+| **JIRA integration** | Fetch issue metadata, create new JIRA tickets, lookup by key, per-user credential storage (JIRA PH instance) |
+| **JIRA.net integration** | Fetch issue metadata from JIRA.net (Global) instance, lookup by key, per-user credential storage. Existing-only (no ticket creation) |
 | **ADO integration** | Create and fetch Azure DevOps work items, status/assignee sync from ADO, per-user PAT storage |
 | **Admin panel** | User CRUD, role assignment, board assignment, credential management per user |
-| **User profile** | Update display name, change password, manage personal JIRA/ADO integrations with connection testing |
+| **User profile** | Update display name, change password, manage personal JIRA/JIRA.net/ADO integrations with connection testing |
+| **Team assignment** | Assign teams to rows via toggle buttons: Technical (existing teams), Business (group-filtered), or Others (free-text custom team name) |
 | **Activity log** | Append-only transaction history capturing every board event |
 | **AI Insights (LLM)** | Azure OpenAI-powered health analysis — per-milestone, board-wide, and Kanban agile advisor. Docked side panel (VS Code chat style) with health summary, risks, and recommendations |
 
@@ -53,7 +55,8 @@ PI planning sessions are a cornerstone of the Scaled Agile Framework (SAFe), but
 Browser (React SPA)
        │  REST (JSON) + JWT Bearer Auth
        ▼
-FastAPI Backend  ──── JIRA REST API (on-prem)
+FastAPI Backend  ──── JIRA PH REST API (jira.homecredit.ph)
+       │         ├─── JIRA.net REST API (jira.homecredit.net/jira)
        │         └─── Azure DevOps REST API
        ▼
     SQLite (Fernet-encrypted credentials)
@@ -69,12 +72,12 @@ FastAPI Backend  ──── JIRA REST API (on-prem)
 |---|---|
 | **Login / Register** | JWT authentication with session-based token storage |
 | **Dashboard** | Board listing with create, clone, archive, delete, and user assignment |
-| **PI Planning Board** | Full planning surface with milestones, team rows, dependency links, and Gantt chart toggle |
+| **PI Planning Board** | Full planning surface with milestones, team rows (Technical/Business/Others), dependency links, and Gantt chart toggle |
 | **Gantt Chart** | Timeline visualization with status-colored bars, today marker, milestone diamonds, and PNG export |
-| **Kanban Board** | Column/row-based card board with JIRA/ADO ticket lookup |
-| **Admin Users** | User management with credential tabs for JIRA/ADO per user |
-| **User Profile** | Profile settings (name, password) and integrations (JIRA/ADO credentials with test) |
-| **Configuration** | Admin credential configuration for JIRA and ADO |
+| **Kanban Board** | Column/row-based card board with JIRA/JIRA.net/ADO ticket lookup |
+| **Admin Users** | User management with credential tabs for JIRA/JIRA.net/ADO per user |
+| **User Profile** | Profile settings (name, password) and integrations (JIRA/JIRA.net/ADO credentials with test) |
+| **Configuration** | Admin credential configuration for JIRA, JIRA.net, and ADO |
 
 ---
 
@@ -165,6 +168,8 @@ Deployed on `automation-npvx00321.ph.infra` using ports in the **9000 range**.
 |---|---|---|
 | Backend (FastAPI) | 9000 | `http://automation-npvx00321.ph.infra:9000` |
 | Frontend (Vite) | 9001 | `http://automation-npvx00321.ph.infra:9001` |
+| Dev Backend | 9002 | `http://automation-npvx00321.ph.infra:9002` |
+| Dev Frontend | 9003 | `http://automation-npvx00321.ph.infra:9003` |
 
 ### Prerequisites (one-time)
 
@@ -178,6 +183,8 @@ Use the provided start scripts:
 ```bash
 bash ~/HCPH_PI_BOARD/start_be.sh   # kills existing, starts backend on :9000 (4 workers)
 bash ~/HCPH_PI_BOARD/start_fe.sh   # kills existing, starts frontend on :9001
+bash ~/HCPH_PI_BOARD_DEV/start_be_dev.sh   # starts dev backend on :9002 (1 worker, board_dev.db)
+bash ~/HCPH_PI_BOARD_DEV/start_fe_dev.sh   # starts dev frontend on :9003
 ```
 
 Or manually:
@@ -240,7 +247,7 @@ cat ~/hcph_frontend.log
 | GET | `/api/board` | Full board state (query: `board_id`, `refresh_external`) |
 | POST | `/api/board/commit` | Commit board changes |
 | POST | `/api/milestones` | Create milestone (JIRA IDEA or temp) |
-| POST | `/api/tasks` | Create task (link existing or create new JIRA/ADO) |
+| POST | `/api/tasks` | Create task (internal, link existing JIRA/JIRA.net/ADO, or create new JIRA/ADO) |
 | PATCH | `/api/items/{item_id}/move` | Move item to different row/slots |
 | DELETE | `/api/items/{item_id}` | Delete item |
 | POST | `/api/links` | Create dependency link |
@@ -262,7 +269,7 @@ cat ~/hcph_frontend.log
 | POST | `/api/kanban/{board_id}/cards` | Create card |
 | PUT | `/api/kanban/cards/{card_id}` | Edit/move card |
 | DELETE | `/api/kanban/cards/{card_id}` | Delete card |
-| GET | `/api/kanban/ticket-lookup` | Lookup JIRA/ADO ticket by key |
+| GET | `/api/kanban/ticket-lookup` | Lookup JIRA/JIRA.net/ADO ticket by key |
 
 ### Admin
 | Method | Path | Description |
@@ -281,7 +288,7 @@ cat ~/hcph_frontend.log
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/credentials` | List current user's credentials |
-| PUT | `/api/credentials/{provider}` | Save/update credential (jira or ado) |
+| PUT | `/api/credentials/{provider}` | Save/update credential (`jira`, `jira_net`, or `ado`) |
 | DELETE | `/api/credentials/{provider}` | Delete credential |
 | POST | `/api/credentials/{provider}/test` | Test credential connection |
 | GET | `/api/jira/projects` | List JIRA projects |
@@ -317,16 +324,29 @@ cat ~/hcph_frontend.log
 | `kanban_columns` | Kanban column definitions with color and position |
 | `kanban_rows` | Kanban swimlane rows |
 | `kanban_cards` | Kanban cards with column/row placement, optional JIRA/ADO link, external_title, external_status, and external_url |
-| `credentials` | Fernet-encrypted JIRA/ADO credentials per user |
+| `credentials` | Fernet-encrypted JIRA/JIRA.net/ADO credentials per user |
 
 ---
 
 ## JIRA Notes
 
+- Two JIRA instances supported: **JIRA PH** (`jira.homecredit.ph`, provider: `jira`) and **JIRA.net** (`jira.homecredit.net/jira`, provider: `jira_net`)
+- JIRA.net is **existing-only** — ticket lookup but no ticket creation
 - Backend uses JIRA REST endpoint: `/rest/api/2/issue/{issueKey}?fields=summary,issuetype`
 - Only `issuetype = IDEA` is allowed for the Milestone row
-- Per-user JIRA credentials are stored encrypted; admin can also manage credentials on behalf of users
-- If your on-prem JIRA uses a different auth mode, adjust `fetch_jira_summary` in backend
+- Per-user JIRA/JIRA.net credentials are stored encrypted; admin can also manage credentials on behalf of users
+- Cross-JIRA-provider links (JIRA ↔ JIRA.net) create bidirectional web links on both instances
+
+---
+
+## Ticket Source Colors
+
+| Provider | Label | Tile Color | Hex |
+|---|---|---|---|
+| `jira` | JIRA | Blue | `#2563eb` |
+| `jira_net` | JIRA.net | Teal | `#0891b2` |
+| `ado` | ADO | Amber | `#d97706` |
+| `internal` / `manual` | Internal | Slate | `#475569` |
 
 ---
 
@@ -337,6 +357,7 @@ Standardized across PI board and Gantt chart for both JIRA and ADO statuses:
 | Status Tone | Matched Keywords | Color | Hex |
 |---|---|---|---|
 | **Done** | done, resolved, closed | Green | `#15803d` |
+| **Cancelled** | cancel, cancelled, canceled | Slate | `#64748b` |
 | **In Progress** | development, dev, progress, active, ongoing | Orange | `#ea7a12` |
 | **Blocked** | block, hold | Red | `#dc2626` |
 | **To Do** | todo, open, backlog, new | Slate | `#64748b` |
@@ -344,6 +365,13 @@ Standardized across PI board and Gantt chart for both JIRA and ADO statuses:
 | **Ready** | ready | Gold | `#d4a017` |
 | **Icebox** | icebox, refill | Red | `#dc2626` |
 | **Unknown** | (no match / empty) | Gray | `#94a3b8` |
+
+### Milestone Progress Calculation
+
+Cancelled tasks are **excluded** from the milestone progress calculation (both numerator and denominator). This ensures progress reflects remaining in-scope work only.
+
+- Formula: `pct = done / (total - cancelled) * 100`
+- Example: 10 tasks, 3 done, 2 cancelled → `3 / (10 - 2) = 38%`
 
 ### Milestone RAG Health
 
