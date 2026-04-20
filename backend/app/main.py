@@ -169,19 +169,28 @@ ROWS = ["Milestone"] + [f"Team#{i}" for i in range(1, 11)]
 SOURCE_JIRA = "jira"
 SOURCE_ADO = "ado"
 
+# All valid credential providers and jira-type helper
+_VALID_PROVIDERS = {"jira", "jira_net", "ado"}
+_JIRA_PROVIDERS = {"jira", "jira_net"}
+
+def _is_jira_provider(provider: str) -> bool:
+    return provider in _JIRA_PROVIDERS
+
 
 def source_tile_color(source: str) -> str:
     if source == SOURCE_ADO:
         return "#d97706"
     if source == SOURCE_JIRA:
         return "#2563eb"
+    if source == "jira_net":
+        return "#0891b2"
     return "#475569"
 
 
 class CreateMilestoneRequest(BaseModel):
     board_id: int
     issue_key: str | None = None
-    ticket_source: str = Field(SOURCE_JIRA, pattern=r"^(jira|ado)$")
+    ticket_source: str = Field(SOURCE_JIRA, pattern=r"^(jira|jira_net|ado)$")
     title: str | None = None
     target_date: date
     end_date: date
@@ -201,7 +210,7 @@ class CreateTaskRequest(BaseModel):
     jira_project_key: str | None = None
     jira_issue_type: str | None = None
     jira_extra_fields: dict | None = None
-    ticket_source: str = Field(SOURCE_JIRA, pattern=r"^(jira|ado)$")
+    ticket_source: str = Field(SOURCE_JIRA, pattern=r"^(jira|jira_net|ado|internal)$")
     row_index: int = Field(..., ge=1, le=10)
     start_slot: int = Field(..., ge=0)
     end_slot: int = Field(..., ge=0)
@@ -294,8 +303,8 @@ def _extract_description_text(value: object) -> str | None:
     return "\n".join(lines)
 
 
-def fetch_jira_issue(issue_key: str, user_id: int | None = None) -> dict:
-    jira_base, auth, verify = _get_jira_connection_settings(user_id)
+def fetch_jira_issue(issue_key: str, user_id: int | None = None, provider: str = "jira") -> dict:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id, provider=provider)
 
     endpoint = (
         f"{jira_base}/rest/api/2/issue/{issue_key}"
@@ -461,26 +470,27 @@ def _decrypt_user_credential(user_id: int, provider: str) -> dict | None:
         return None
 
 
-def _get_jira_connection_settings(user_id: int | None = None) -> tuple[str, tuple[str, str] | None, bool | str]:
+def _get_jira_connection_settings(user_id: int | None = None, provider: str = "jira") -> tuple[str, tuple[str, str] | None, bool | str]:
     jira_base = ""
     username = ""
     token = ""
 
     # Try DB credentials first
     if user_id:
-        cred = _decrypt_user_credential(user_id, "jira")
+        cred = _decrypt_user_credential(user_id, provider)
         if cred:
             jira_base = (cred.get("jira_url") or "").rstrip("/")
             username = cred.get("email") or ""
             token = cred.get("password") or ""
 
-    # Fall back to env vars if DB didn't provide values
-    if not jira_base:
-        jira_base = (os.getenv("JIRA_BASE_URL") or os.getenv("JIRA_URL") or "").rstrip("/")
-    if not username:
-        username = os.getenv("JIRA_USERNAME") or ""
-    if not token:
-        token = os.getenv("JIRA_API_TOKEN") or os.getenv("JIRA_PASSWORD") or ""
+    # Fall back to env vars if DB didn't provide values (only for "jira" provider)
+    if provider == "jira":
+        if not jira_base:
+            jira_base = (os.getenv("JIRA_BASE_URL") or os.getenv("JIRA_URL") or "").rstrip("/")
+        if not username:
+            username = os.getenv("JIRA_USERNAME") or ""
+        if not token:
+            token = os.getenv("JIRA_API_TOKEN") or os.getenv("JIRA_PASSWORD") or ""
 
     verify_ssl_raw = (os.getenv("JIRA_VERIFY_SSL") or "true").strip().lower()
     verify_ssl = verify_ssl_raw not in {"0", "false", "no"}
@@ -741,8 +751,8 @@ def _build_ado_work_item_web_link(work_item_key: str, user_id: int | None = None
     return url, f"ADO {work_item_id}"
 
 
-def _create_jira_web_link(issue_key: str, url: str, title: str, user_id: int | None = None) -> None:
-    jira_base, auth, verify = _get_jira_connection_settings(user_id)
+def _create_jira_web_link(issue_key: str, url: str, title: str, user_id: int | None = None, provider: str = "jira") -> None:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id, provider=provider)
     endpoint = f"{jira_base}/rest/api/2/issue/{issue_key}/remotelink"
     payload = {
         "object": {
@@ -780,8 +790,8 @@ def _extract_ado_text(value: object) -> str | None:
 
 def _normalize_ticket_source(value: str | None) -> str:
     normalized = (value or SOURCE_JIRA).strip().lower()
-    if normalized not in {SOURCE_JIRA, SOURCE_ADO}:
-        raise HTTPException(status_code=400, detail="ticket_source must be either 'jira' or 'ado'")
+    if normalized not in _VALID_PROVIDERS and normalized != "internal":
+        raise HTTPException(status_code=400, detail=f"ticket_source must be one of {sorted(_VALID_PROVIDERS | {'internal'})}")
     return normalized
 
 
@@ -912,6 +922,19 @@ app.add_middleware(
 _PUBLIC_PATHS = {"/health", "/api/auth/login", "/api/auth/register"}
 
 
+def _auth_error_response(request: Request, status_code: int, detail: str):
+    """Return a JSON error with CORS headers so browsers can read it cross-origin."""
+    from starlette.responses import JSONResponse
+    cors_origin = os.getenv("CORS_ORIGIN", "")
+    origin = request.headers.get("origin", "")
+    headers = {}
+    if origin and cors_origin and origin == cors_origin:
+        headers["access-control-allow-origin"] = origin
+        headers["access-control-allow-credentials"] = "true"
+        headers["vary"] = "Origin"
+    return JSONResponse(status_code=status_code, content={"detail": detail}, headers=headers)
+
+
 @app.middleware("http")
 async def auth_guard(request: Request, call_next):
     path = request.url.path
@@ -920,22 +943,18 @@ async def auth_guard(request: Request, call_next):
         return await call_next(request)
     auth_header = request.headers.get("authorization", "")
     if not auth_header.startswith("Bearer "):
-        from starlette.responses import JSONResponse
-        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+        return _auth_error_response(request, 401, "Not authenticated")
     token = auth_header.split(" ", 1)[1]
     try:
         payload = _decode_token(token)
         user = fetch_user_by_id(payload["sub"])
         if not user:
-            from starlette.responses import JSONResponse
-            return JSONResponse(status_code=401, content={"detail": "User not found"})
+            return _auth_error_response(request, 401, "User not found")
         request.state.user = user
     except jwt.ExpiredSignatureError:
-        from starlette.responses import JSONResponse
-        return JSONResponse(status_code=401, content={"detail": "Token expired"})
+        return _auth_error_response(request, 401, "Token expired")
     except jwt.InvalidTokenError:
-        from starlette.responses import JSONResponse
-        return JSONResponse(status_code=401, content={"detail": "Invalid token"})
+        return _auth_error_response(request, 401, "Invalid token")
     return await call_next(request)
 
 
@@ -959,9 +978,9 @@ def _sync_external_ticket_fields(items: list[dict], user_id: int | None = None) 
         source = _normalize_ticket_source(item.get("ticket_source"))
         issue_key = (item.get("issue_key") or "").strip()
 
-        if source == SOURCE_JIRA and issue_key:
+        if _is_jira_provider(source) and issue_key:
             try:
-                issue = fetch_jira_issue(issue_key, user_id)
+                issue = fetch_jira_issue(issue_key, user_id, provider=source)
             except HTTPException:
                 synced.append(item)
                 continue
@@ -1327,18 +1346,18 @@ def create_milestone(payload: CreateMilestoneRequest, user: dict = Depends(get_c
         return item
 
     # ── Normal (synced) milestone flow ──
-    if ticket_source != SOURCE_JIRA:
+    if not _is_jira_provider(ticket_source):
         raise HTTPException(status_code=400, detail="Milestones only support JIRA IDEA tickets")
 
     raw_issue_key = (payload.issue_key or "").strip()
-    issue_key = raw_issue_key.upper() if ticket_source == SOURCE_JIRA else raw_issue_key
+    issue_key = raw_issue_key.upper() if _is_jira_provider(ticket_source) else raw_issue_key
     if not issue_key:
         raise HTTPException(status_code=400, detail="Existing JIRA IDEA key is required for milestones")
 
     issue: dict | None = None
 
-    if ticket_source == SOURCE_JIRA:
-        issue = fetch_jira_issue(issue_key, user["id"])
+    if _is_jira_provider(ticket_source):
+        issue = fetch_jira_issue(issue_key, user["id"], provider=ticket_source)
         if issue["issue_type"].lower() != "idea":
             raise HTTPException(status_code=400, detail="Only IDEA issue type is allowed for Milestone row")
     else:
@@ -1410,7 +1429,7 @@ def create_task(payload: CreateTaskRequest, user: dict = Depends(get_current_use
 
     ticket_source = _normalize_ticket_source(payload.ticket_source)
     raw_issue_key = (payload.issue_key or "").strip()
-    issue_key = raw_issue_key.upper() if ticket_source == SOURCE_JIRA else raw_issue_key
+    issue_key = raw_issue_key.upper() if _is_jira_provider(ticket_source) else raw_issue_key
     title = payload.title.strip()
     issue: dict | None = None
     jira_created = False
@@ -1420,9 +1439,14 @@ def create_task(payload: CreateTaskRequest, user: dict = Depends(get_current_use
     sync_failed = False
     sync_error_message: str | None = None
 
-    if issue_key:
-        if ticket_source == SOURCE_JIRA:
-            issue = fetch_jira_issue(issue_key, user["id"])
+    if ticket_source == "internal":
+        # Internal / manual task — no external ticket creation
+        if not title:
+            raise HTTPException(status_code=400, detail="Task title is required for internal tasks")
+        issue_key = ""
+    elif issue_key:
+        if _is_jira_provider(ticket_source):
+            issue = fetch_jira_issue(issue_key, user["id"], provider=ticket_source)
         else:
             issue = fetch_ado_work_item(issue_key, user["id"])
             _ensure_ado_user_story(issue, "Task row")
@@ -1432,7 +1456,7 @@ def create_task(payload: CreateTaskRequest, user: dict = Depends(get_current_use
     else:
         if not title:
             raise HTTPException(status_code=400, detail="Task title is required when issue key is not provided")
-        if ticket_source == SOURCE_JIRA:
+        if _is_jira_provider(ticket_source):
             issue_type_name = (payload.jira_issue_type or "Task").strip() or "Task"
             try:
                 created = create_jira_issue(
@@ -1444,7 +1468,7 @@ def create_task(payload: CreateTaskRequest, user: dict = Depends(get_current_use
                 )
                 jira_created = True
                 jira_created_issue_key = created["issue_key"]
-                issue = fetch_jira_issue(created["issue_key"], user["id"])
+                issue = fetch_jira_issue(created["issue_key"], user["id"], provider=ticket_source)
                 issue_key = issue["issue_key"]
                 title = issue["summary"]
             except Exception as exc:
@@ -1466,7 +1490,7 @@ def create_task(payload: CreateTaskRequest, user: dict = Depends(get_current_use
     if not title:
         raise HTTPException(status_code=400, detail="Task title is required when issue key is not provided")
 
-    system_label = "JIRA" if ticket_source == SOURCE_JIRA else "Azure DevOps"
+    system_label = "Internal" if ticket_source == "internal" else ("JIRA.net" if ticket_source == "jira_net" else ("JIRA" if ticket_source == SOURCE_JIRA else "Azure DevOps"))
     item = insert_item(
         {
             "issue_key": issue_key or None,
@@ -1574,14 +1598,40 @@ def create_link(payload: CreateLinkRequest, user: dict = Depends(get_current_use
     worklog_item = target_item if source_is_idea else (source_item if target_is_idea else None)
 
     if not skip_external_link:
-        # Use the user's selected link type for all JIRA-to-JIRA links
+        # Use the user's selected link type for all JIRA-to-JIRA links (same provider)
         if (
             source_key
             and target_key
-            and source_source == SOURCE_JIRA
-            and target_source == SOURCE_JIRA
+            and _is_jira_provider(source_source)
+            and _is_jira_provider(target_source)
+            and source_source == target_source
         ):
             _create_jira_link_for_board_type(source_key, target_key, payload.link_type, user["id"])
+            jira_link_synced = True
+
+        # Cross-JIRA-provider links (jira <-> jira_net): create web links on both sides
+        if (
+            source_key
+            and target_key
+            and _is_jira_provider(source_source)
+            and _is_jira_provider(target_source)
+            and source_source != target_source
+        ):
+            # Build URLs for each ticket on their respective JIRA instance
+            source_base, _, _ = _get_jira_connection_settings(user["id"], provider=source_source)
+            target_base, _, _ = _get_jira_connection_settings(user["id"], provider=target_source)
+            source_url = f"{source_base}/browse/{source_key}"
+            target_url = f"{target_base}/browse/{target_key}"
+            # Create web link on source JIRA pointing to target
+            try:
+                _create_jira_web_link(source_key, target_url, target_key, user["id"], provider=source_source)
+            except Exception:
+                pass  # best-effort
+            # Create web link on target JIRA pointing to source
+            try:
+                _create_jira_web_link(target_key, source_url, source_key, user["id"], provider=target_source)
+            except Exception:
+                pass  # best-effort
             jira_link_synced = True
 
         if idea_item and worklog_item:
@@ -1590,9 +1640,9 @@ def create_link(payload: CreateLinkRequest, user: dict = Depends(get_current_use
             idea_source = _normalize_ticket_source(idea_item.get("ticket_source"))
             worklog_source = _normalize_ticket_source(worklog_item.get("ticket_source"))
 
-            if idea_key and worklog_key and idea_source == SOURCE_JIRA and worklog_source == SOURCE_ADO:
+            if idea_key and worklog_key and _is_jira_provider(idea_source) and worklog_source == SOURCE_ADO:
                 ado_url, ado_title = _build_ado_work_item_web_link(worklog_key, user["id"])
-                _create_jira_web_link(idea_key, ado_url, ado_title, user["id"])
+                _create_jira_web_link(idea_key, ado_url, ado_title, user["id"], provider=idea_source)
                 jira_link_synced = True
 
     try:
@@ -1693,7 +1743,7 @@ def update_profile(payload: ProfileUpdateRequest, user: dict = Depends(get_curre
 # ── Admin credential management ─────────────────────────────────────────
 
 class CredentialRequest(BaseModel):
-    provider: str = Field(..., pattern=r"^(jira|ado)$")
+    provider: str = Field(..., pattern=r"^(jira|jira_net|ado)$")
     label: str | None = None
     # Jira fields
     email: str | None = None
@@ -1715,14 +1765,14 @@ def admin_list_user_credentials(user_id: int, admin: dict = Depends(require_admi
 
 @app.put("/api/admin/users/{user_id}/credentials/{provider}")
 def admin_save_user_credential(user_id: int, provider: str, body: CredentialRequest, admin: dict = Depends(require_admin)) -> dict:
-    if provider not in ("jira", "ado"):
-        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    if provider not in _VALID_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Provider must be one of {sorted(_VALID_PROVIDERS)}")
     target = fetch_user_by_id(user_id)
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
 
     import json as _json
-    if provider == "jira":
+    if _is_jira_provider(provider):
         if not body.email or not body.password:
             raise HTTPException(status_code=400, detail="Jira requires email and password")
         secret_payload = _json.dumps({"email": body.email, "password": body.password, "jira_url": body.jira_url or ""})
@@ -1738,8 +1788,8 @@ def admin_save_user_credential(user_id: int, provider: str, body: CredentialRequ
 
 @app.delete("/api/admin/users/{user_id}/credentials/{provider}")
 def admin_delete_user_credential(user_id: int, provider: str, admin: dict = Depends(require_admin)) -> dict:
-    if provider not in ("jira", "ado"):
-        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    if provider not in _VALID_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Provider must be one of {sorted(_VALID_PROVIDERS)}")
     deleted = delete_credential(user_id, provider)
     if not deleted:
         raise HTTPException(status_code=404, detail="Credential not found")
@@ -1762,7 +1812,7 @@ class KanbanCardRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
     color: str = "#1f6688"
     issue_key: str | None = None
-    ticket_source: str | None = Field(None, pattern="^(jira|ado)$")
+    ticket_source: str | None = Field(None, pattern="^(jira|jira_net|ado)$")
     description: str | None = None
     assignee: str | None = None
     external_status: str | None = None
@@ -1777,12 +1827,12 @@ class KanbanCardMoveRequest(BaseModel):
 
 
 @app.get("/api/kanban/ticket-lookup")
-def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Query(..., pattern="^(jira|ado)$"), user: dict = Depends(get_current_user)) -> dict:
-    """Fetch ticket info from JIRA or ADO by exact key."""
+def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Query(..., pattern="^(jira|jira_net|ado)$"), user: dict = Depends(get_current_user)) -> dict:
+    """Fetch ticket info from JIRA, JIRA.net, or ADO by exact key."""
     try:
-        if source == "jira":
-            ticket = fetch_jira_issue(key.strip(), user["id"])
-            jira_base, _, _ = _get_jira_connection_settings(user["id"])
+        if _is_jira_provider(source):
+            ticket = fetch_jira_issue(key.strip(), user["id"], provider=source)
+            jira_base, _, _ = _get_jira_connection_settings(user["id"], provider=source)
             external_url = f"{jira_base}/browse/{ticket['issue_key']}"
         else:
             ticket = fetch_ado_work_item(key.strip(), user["id"])
@@ -1801,7 +1851,7 @@ def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Quer
     except HTTPException:
         raise
     except Exception as e:
-        src_label = "JIRA" if source == "jira" else "ADO"
+        src_label = "JIRA.net" if source == "jira_net" else ("JIRA" if source == "jira" else ("Internal" if source == "internal" else "ADO"))
         raise HTTPException(status_code=404, detail=f"Could not find {src_label} ticket '{key}'. Check the key and your integration credentials.")
 
 
@@ -2166,8 +2216,8 @@ def list_credentials(user: dict = Depends(get_current_user)) -> dict:
 @app.get("/api/credentials/{provider}/details")
 def get_credential_details(provider: str, user: dict = Depends(get_current_user)) -> dict:
     """Return decrypted credential fields for editing (passwords/PATs masked)."""
-    if provider not in ("jira", "ado"):
-        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    if provider not in _VALID_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Provider must be one of {sorted(_VALID_PROVIDERS)}")
     cred = fetch_credential(user["id"], provider)
     if not cred:
         raise HTTPException(status_code=404, detail="Credential not found")
@@ -2176,10 +2226,10 @@ def get_credential_details(provider: str, user: dict = Depends(get_current_user)
         decrypted = _json.loads(_fernet.decrypt(cred["encrypted_data"].encode()).decode())
     except Exception:
         raise HTTPException(status_code=500, detail="Could not decrypt credential")
-    if provider == "jira":
+    if _is_jira_provider(provider):
         pw = decrypted.get("password", "")
         return {
-            "provider": "jira",
+            "provider": provider,
             "label": cred.get("label", ""),
             "email": decrypted.get("email", ""),
             "jira_url": decrypted.get("jira_url", ""),
@@ -2197,8 +2247,8 @@ def get_credential_details(provider: str, user: dict = Depends(get_current_user)
 
 @app.put("/api/credentials/{provider}")
 def save_credential(provider: str, body: CredentialRequest, user: dict = Depends(get_current_user)) -> dict:
-    if provider not in ("jira", "ado"):
-        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    if provider not in _VALID_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Provider must be one of {sorted(_VALID_PROVIDERS)}")
     if body.provider != provider:
         raise HTTPException(status_code=400, detail="Provider in URL and body must match")
 
@@ -2206,7 +2256,7 @@ def save_credential(provider: str, body: CredentialRequest, user: dict = Depends
 
     # Merge with stored credential when password/PAT not provided (edit mode)
     stored_decrypted = {}
-    if (provider == "jira" and not body.password) or (provider == "ado" and not body.pat):
+    if (_is_jira_provider(provider) and not body.password) or (provider == "ado" and not body.pat):
         stored = fetch_credential(user["id"], provider)
         if stored:
             try:
@@ -2214,7 +2264,7 @@ def save_credential(provider: str, body: CredentialRequest, user: dict = Depends
             except Exception:
                 pass
 
-    if provider == "jira":
+    if _is_jira_provider(provider):
         email = body.email or stored_decrypted.get("email", "")
         password = body.password or stored_decrypted.get("password", "")
         jira_url = body.jira_url or stored_decrypted.get("jira_url", "")
@@ -2242,8 +2292,8 @@ def save_credential(provider: str, body: CredentialRequest, user: dict = Depends
 
 @app.delete("/api/credentials/{provider}")
 def remove_credential(provider: str, user: dict = Depends(get_current_user)) -> dict:
-    if provider not in ("jira", "ado"):
-        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    if provider not in _VALID_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Provider must be one of {sorted(_VALID_PROVIDERS)}")
     deleted = delete_credential(user["id"], provider)
     if not deleted:
         raise HTTPException(status_code=404, detail="Credential not found")
@@ -2264,8 +2314,8 @@ def credentials_health(user: dict = Depends(get_current_user)) -> dict:
             results[provider] = {"status": "failed", "message": "Could not decrypt credentials"}
             continue
         try:
-            if provider == "jira":
-                jira_url = (decrypted.get("jira_url") or os.getenv("JIRA_URL", "")).rstrip("/")
+            if _is_jira_provider(provider):
+                jira_url = (decrypted.get("jira_url") or ("" if provider != "jira" else os.getenv("JIRA_URL", ""))).rstrip("/")
                 if not jira_url:
                     results[provider] = {"status": "failed", "message": "No Jira URL configured"}
                     continue
@@ -2301,8 +2351,8 @@ def credentials_health(user: dict = Depends(get_current_user)) -> dict:
 
 @app.post("/api/credentials/{provider}/test")
 def test_credential(provider: str, body: CredentialRequest, user: dict = Depends(get_current_user)) -> dict:
-    if provider not in ("jira", "ado"):
-        raise HTTPException(status_code=400, detail="Provider must be 'jira' or 'ado'")
+    if provider not in _VALID_PROVIDERS:
+        raise HTTPException(status_code=400, detail=f"Provider must be one of {sorted(_VALID_PROVIDERS)}")
 
     # Fall back to stored credentials when password/PAT not provided (edit mode)
     import json as _json
@@ -2312,12 +2362,12 @@ def test_credential(provider: str, body: CredentialRequest, user: dict = Depends
     ado_org = body.ado_org or ""
     jira_url = body.jira_url or ""
 
-    if (provider == "jira" and not password) or (provider == "ado" and not pat):
+    if (_is_jira_provider(provider) and not password) or (provider == "ado" and not pat):
         stored = fetch_credential(user["id"], provider)
         if stored:
             try:
                 decrypted = _json.loads(_fernet.decrypt(stored["encrypted_data"].encode()).decode())
-                if provider == "jira":
+                if _is_jira_provider(provider):
                     password = password or decrypted.get("password", "")
                     email = email or decrypted.get("email", "")
                     jira_url = jira_url or decrypted.get("jira_url", "")
@@ -2327,10 +2377,10 @@ def test_credential(provider: str, body: CredentialRequest, user: dict = Depends
             except Exception:
                 return {"status": "failed", "message": "Could not decrypt stored credential"}
 
-    if provider == "jira":
+    if _is_jira_provider(provider):
         if not email or not password:
             raise HTTPException(status_code=400, detail="Jira requires email and password")
-        jira_url = (jira_url or os.getenv("JIRA_URL", "")).rstrip("/")
+        jira_url = (jira_url or ("" if provider != "jira" else os.getenv("JIRA_URL", ""))).rstrip("/")
         if not jira_url:
             raise HTTPException(status_code=400, detail="Jira URL is required")
         try:
@@ -2383,6 +2433,8 @@ def _get_status_tone(status: str) -> str:
         return "unknown"
     if "done" in v or "resolved" in v or "closed" in v:
         return "done"
+    if "cancel" in v:
+        return "cancelled"
     if "block" in v or "hold" in v:
         return "blocked"
     if "dev" in v or "progress" in v or "active" in v or "ongoing" in v:
@@ -2412,10 +2464,12 @@ def _gather_milestone_context(milestone_id: int) -> dict | None:
 
     linked_tasks = [it for it in all_items if it["id"] in linked_ids and it.get("item_type") != "IDEA"]
     total = len(linked_tasks)
+    cancelled = sum(1 for t in linked_tasks if _get_status_tone(t.get("jira_status")) == "cancelled")
+    effective_total = total - cancelled
     done = sum(1 for t in linked_tasks if _get_status_tone(t.get("jira_status")) == "done")
     blocked = sum(1 for t in linked_tasks if _get_status_tone(t.get("jira_status")) == "blocked")
     in_progress = sum(1 for t in linked_tasks if _get_status_tone(t.get("jira_status")) == "in-progress")
-    pct = round(done / total * 100) if total else 0
+    pct = round(done / effective_total * 100) if effective_total else 0
 
     # Timeline
     today_str = date.today().isoformat()

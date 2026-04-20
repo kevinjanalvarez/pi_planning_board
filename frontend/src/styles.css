@@ -468,6 +468,17 @@ body {
 .link-path {
   cursor: pointer;
   pointer-events: stroke;
+  transition: stroke-width 0.15s, opacity 0.15s;
+}
+
+.link-group:hover .link-path {
+  stroke-width: 3;
+  opacity: 1;
+  filter: drop-shadow(0 0 3px rgba(0,0,0,0.3));
+}
+
+.link-group:hover .link-label {
+  font-weight: 700;
 }
 
 .link-path-focused {
@@ -717,6 +728,18 @@ body {
   background-image: linear-gradient(rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.58));
 }
 
+.ticket-source-jira_net {
+  background-image: linear-gradient(rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.58));
+}
+
+.ticket-source-internal {
+  background-image: linear-gradient(rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.58));
+}
+
+.ticket-source-manual {
+  background-image: linear-gradient(rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.58));
+}
+
 .ticket::before {
   content: "";
   position: absolute;
@@ -854,6 +877,10 @@ body {
 
 .ticket-status-unknown {
   --status-accent: #94a3b8;
+}
+
+.ticket-status-cancelled {
+  --status-accent: #64748b;
 }
 
 .resize-handle {

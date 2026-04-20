@@ -214,6 +214,9 @@ function getTileColor(item) {
   if (source === "jira") {
     return "#2563eb";
   }
+  if (source === "jira_net") {
+    return "#0891b2";
+  }
   return item?.color;
 }
 
@@ -235,7 +238,7 @@ function getTicketLabel(item) {
 
 function getTicketMetaLine(item) {
   const source = (item?.ticket_source || "").toLowerCase();
-  if (source !== "jira" && source !== "ado") {
+  if (source !== "jira" && source !== "jira_net" && source !== "ado") {
     return "";
   }
   const parts = [];
@@ -271,6 +274,9 @@ function getStatusTone(status) {
   if (value.includes("done") || value.includes("resolved") || value.includes("closed")) {
     return "done";
   }
+  if (value.includes("cancel")) {
+    return "cancelled";
+  }
   if (value.includes("progress") || value.includes("active") || value.includes("ongoing")) {
     return "in-progress";
   }
@@ -297,10 +303,12 @@ function getMilestoneProgress(milestoneId, items, links) {
   // Gather linked items (only TASKs, not other milestones)
   const linkedItems = items.filter((it) => linkedIds.has(it.id) && it.item_type !== "IDEA");
   const total = linkedItems.length;
-  if (total === 0) return { total: 0, done: 0, pct: 0, linkedItems };
+  const cancelled = linkedItems.filter((it) => getStatusTone(it.jira_status) === "cancelled").length;
+  const effectiveTotal = total - cancelled;
+  if (effectiveTotal === 0) return { total: effectiveTotal, done: 0, pct: 0, linkedItems };
   const done = linkedItems.filter((it) => getStatusTone(it.jira_status) === "done").length;
-  const pct = Math.round((done / total) * 100);
-  return { total, done, pct, linkedItems };
+  const pct = Math.round((done / effectiveTotal) * 100);
+  return { total: effectiveTotal, done, pct, linkedItems };
 }
 
 /**
@@ -453,7 +461,7 @@ export default function App() {
   const [jiraServiceLoading, setJiraServiceLoading] = useState(false);
   const [jiraServiceFieldKey, setJiraServiceFieldKey] = useState("customfield_12102");
   const [teamAssignments, setTeamAssignments] = useState({});
-  const [teamForm, setTeamForm] = useState({ rowIndex: null, teamCode: "", teamType: "technical", businessGroup: "All" });
+  const [teamForm, setTeamForm] = useState({ rowIndex: null, teamCode: "", teamType: "technical", businessGroup: "All", customTeamName: "" });
   const [linkMode, setLinkMode] = useState(null);
   const [linkPaths, setLinkPaths] = useState([]);
   const [linkCanvas, setLinkCanvas] = useState({ width: 0, height: 0, scrollLeft: 0, scrollTop: 0 });
@@ -1018,11 +1026,13 @@ export default function App() {
     const currentTeamCode = teamAssignments[rowIndex] || "";
     const selectedTeam = currentTeamCode ? TEAM_OPTION_BY_CODE[currentTeamCode] : null;
     setMenu({ type: "team", x: event.clientX, y: event.clientY, rowIndex });
+    const inferredType = selectedTeam?.type || (currentTeamCode && !selectedTeam ? "others" : "technical");
     setTeamForm({
       rowIndex,
       teamCode: currentTeamCode,
-      teamType: selectedTeam?.type || "technical",
+      teamType: inferredType,
       businessGroup: selectedTeam?.group || "All",
+      customTeamName: inferredType === "others" ? currentTeamCode : "",
     });
   }
 
@@ -1090,12 +1100,13 @@ export default function App() {
 
     setError("");
     try {
+      const effectiveCode = teamForm.teamType === "others" ? (teamForm.customTeamName.trim() || null) : (teamForm.teamCode || null);
       const res = await apiFetch(`${API_BASE}/api/team-assignments/${teamForm.rowIndex}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ board_id: selectedBoard?.id, team_code: teamForm.teamCode || null }),
+        body: JSON.stringify({ board_id: selectedBoard?.id, team_code: effectiveCode }),
       });
 
       if (!res.ok) {
@@ -1196,14 +1207,14 @@ export default function App() {
 
       const payload = {
         board_id: selectedBoard?.id,
-        title: taskForm.source_mode === "new" ? taskForm.title : "",
+        title: taskForm.source_mode === "new" || taskForm.source_mode === "internal" ? taskForm.title : "",
         issue_key: taskForm.source_mode === "existing" ? taskForm.issue_key || null : null,
         jira_project_key:
           taskForm.source_mode === "new" && taskForm.ticket_source === "jira" ? taskForm.jira_project_key || null : null,
         jira_issue_type:
           taskForm.source_mode === "new" && taskForm.ticket_source === "jira" ? taskForm.jira_issue_type || null : null,
         jira_extra_fields: jiraExtraFields,
-        ticket_source: taskForm.ticket_source,
+        ticket_source: taskForm.source_mode === "internal" ? "internal" : taskForm.ticket_source,
         row_index: taskForm.row_index,
         start_slot: startSlotFromDate,
         end_slot: endSlotFromDate,
@@ -1434,12 +1445,16 @@ export default function App() {
 
     event.stopPropagation();
 
-    // Detect cross-platform (JIRA <-> ADO) — auto-create as "external link"
+    // Detect cross-platform — auto-create as "external link"
+    // JIRA.net is always treated as cross-platform (like ADO behavior)
     const sourceItem = board.items.find((i) => i.id === linkMode.sourceItemId);
     const targetItem = board.items.find((i) => i.id === targetItemId);
     const srcSource = (sourceItem?.ticket_source || "").toLowerCase();
     const tgtSource = (targetItem?.ticket_source || "").toLowerCase();
-    const isCrossPlatform = (srcSource === "jira" && tgtSource === "ado") || (srcSource === "ado" && tgtSource === "jira");
+    const isCrossPlatform =
+      srcSource === "jira_net" || tgtSource === "jira_net" ||
+      (srcSource === "jira" && tgtSource === "ado") ||
+      (srcSource === "ado" && tgtSource === "jira");
 
     if (isCrossPlatform) {
       setLinkTypeMenu({ x: event.clientX, y: event.clientY, targetItemId });
@@ -2305,7 +2320,7 @@ export default function App() {
                 const ganttColorMap = {
                   done: "#15803d", "in-progress": "#ea7a12", blocked: "#dc2626",
                   todo: "#64748b", design: "#d4a017", ready: "#d4a017",
-                  icebox: "#dc2626", unknown: "#94a3b8",
+                  icebox: "#dc2626", cancelled: "#64748b", unknown: "#94a3b8",
                 };
                 const statusColor = (s) => ganttColorMap[getStatusTone(s)] || "#94a3b8";
                 const statusText = (s) => { const t = getStatusTone(s); return t === "design" || t === "ready" ? "#422006" : "#fff"; };
@@ -2470,7 +2485,7 @@ export default function App() {
                               }} />
                             )}
                             {milestones.map((ms, mi) => {
-                              const cx = ms.start_slot * colW + colW / 2;
+                              const cx = (ms.end_slot != null ? ms.end_slot : ms.start_slot) * colW + colW / 2;
                               const myTop = mi * 44 + 4;
                               const prog = getMilestoneProgress(ms.id, board.items || [], board.links || []);
                               const rag = getMilestoneRAG(ms, prog, selectedBoard?.start_date, selectedBoard?.end_date, months);
@@ -2558,23 +2573,38 @@ export default function App() {
                 const isFocused =
                   !selectedTicketId ||
                   (highlightedTicketIds.has(path.sourceItemId) && highlightedTicketIds.has(path.targetItemId));
+                const sourceItem = board.items.find((it) => it.id === path.sourceItemId);
+                const targetItem = board.items.find((it) => it.id === path.targetItemId);
+                const sourceLabel = sourceItem ? (sourceItem.issue_key || sourceItem.title || `#${sourceItem.id}`) : `#${path.sourceItemId}`;
+                const targetLabel = targetItem ? (targetItem.issue_key || targetItem.title || `#${targetItem.id}`) : `#${path.targetItemId}`;
                 return (
-                  <g key={path.id}>
+                  <g key={path.id} className="link-group">
+                    {/* Wide invisible hit area for easier clicking */}
+                    <path
+                      d={path.d}
+                      stroke="transparent"
+                      strokeWidth="14"
+                      fill="none"
+                      style={{ cursor: showLinks ? "pointer" : "default" }}
+                      pointerEvents={showLinks ? "stroke" : "none"}
+                      onClick={(e) => {
+                        if (!showLinks) return;
+                        e.stopPropagation();
+                        setConfirmDialog({
+                          message: `Remove "${path.linkType}" link?\n\n${sourceLabel}  →  ${targetLabel}`,
+                          onConfirm: () => { setConfirmDialog(null); removeLink(path.id); },
+                        });
+                      }}
+                    />
                     <path
                       d={path.d}
                       stroke={style.stroke}
                       strokeDasharray={style.dasharray}
-                      strokeWidth="1"
+                      strokeWidth="1.5"
                       fill="none"
                       markerEnd="url(#linkArrow)"
                       className={`link-path ${isFocused ? "link-path-focused" : "link-path-dim"}`}
-                      onClick={(e) => {
-                        if (!showLinks) {
-                          return;
-                        }
-                        e.stopPropagation();
-                        removeLink(path.id);
-                      }}
+                      pointerEvents="none"
                     />
                     <text x={path.midX} y={path.midY - 6} className="link-label">
                       {path.linkType}
@@ -2631,7 +2661,7 @@ export default function App() {
                     ? row.index === 0
                     : row.index !== 0 && Boolean(assignedTeamCode)
                   : false;
-                const assignedTeamName = assignedTeamCode ? TEAM_NAME_MAP[assignedTeamCode] : "";
+                const assignedTeamName = assignedTeamCode ? (TEAM_NAME_MAP[assignedTeamCode] || assignedTeamCode) : "";
                 const laneCount = rowLaneCount[row.index] || 1;
 
                 return (
@@ -2955,12 +2985,13 @@ export default function App() {
       {menu?.type === "milestone" ? (
         <div
           onMouseDown={(e) => { if (e.target === e.currentTarget) setMenu(null); }}
+          onClick={(e) => e.stopPropagation()}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onMouseDown={(e) => e.stopPropagation()}>
+          <div onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
           <form onSubmit={createMilestone} className="form">
             <h3>Add IDEA Milestone</h3>
             <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 4 }}>
@@ -3047,76 +3078,81 @@ export default function App() {
       {menu?.type === "team" ? (
         <div
           onMouseDown={(e) => { if (e.target === e.currentTarget) setMenu(null); }}
+          onClick={(e) => e.stopPropagation()}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onMouseDown={(e) => e.stopPropagation()}>
+          <div onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
           <form onSubmit={saveTeamAssignment} className="form">
             <h3>Assign Team</h3>
-            <label>
-              Team Type
-              <div className="team-type-row">
-                <label className="team-type-option">
-                  <input
-                    type="radio"
-                    name="teamType"
-                    value="technical"
-                    checked={teamForm.teamType === "technical"}
-                    onChange={() => setTeamForm((prev) => ({ ...prev, teamType: "technical", teamCode: "" }))}
-                  />
-                  Technical
-                </label>
-                <label className="team-type-option">
-                  <input
-                    type="radio"
-                    name="teamType"
-                    value="business"
-                    checked={teamForm.teamType === "business"}
-                    onChange={() =>
-                      setTeamForm((prev) => ({
-                        ...prev,
-                        teamType: "business",
-                        businessGroup: prev.businessGroup || "All",
-                        teamCode: "",
-                      }))
-                    }
-                  />
-                  Business
-                </label>
-              </div>
-            </label>
-            {teamForm.teamType === "business" ? (
+            <label>Team Type</label>
+            <div style={{ display: "flex", marginBottom: 16, borderRadius: 8, overflow: "hidden", border: "1px solid #e5e7eb" }}>
+              {[
+                { key: "technical", label: "Technical", bg: "#1d4ed8" },
+                { key: "business", label: "Business", bg: "#059669" },
+                { key: "others", label: "Others", bg: "#374151" },
+              ].map((m) => (
+                <button key={m.key} type="button" onClick={() => {
+                  if (m.key === "technical") setTeamForm((prev) => ({ ...prev, teamType: "technical", teamCode: "", customTeamName: "" }));
+                  else if (m.key === "business") setTeamForm((prev) => ({ ...prev, teamType: "business", teamCode: "", businessGroup: prev.businessGroup || "All", customTeamName: "" }));
+                  else setTeamForm((prev) => ({ ...prev, teamType: "others", teamCode: "", customTeamName: "" }));
+                }}
+                  style={{
+                    flex: 1, padding: "9px 0", border: "none", cursor: "pointer",
+                    background: teamForm.teamType === m.key ? m.bg : "#f9fafb",
+                    color: teamForm.teamType === m.key ? "#fff" : "#6b7280",
+                    fontWeight: 700, fontSize: 13, transition: "all 0.15s",
+                  }}
+                >{m.label}</button>
+              ))}
+            </div>
+            {teamForm.teamType === "others" ? (
               <label>
-                Business Group
-                <select
-                  value={teamForm.businessGroup}
-                  onChange={(e) => setTeamForm((prev) => ({ ...prev, businessGroup: e.target.value, teamCode: "" }))}
-                >
-                  <option value="All">All</option>
-                  {BUSINESS_GROUP_OPTIONS.map((group) => (
-                    <option key={group} value={group}>
-                      {group}
-                    </option>
-                  ))}
-                </select>
+                Team Name
+                <input
+                  value={teamForm.customTeamName}
+                  onChange={(e) => setTeamForm((prev) => ({ ...prev, customTeamName: e.target.value }))}
+                  placeholder="Enter team name"
+                  required
+                  autoFocus
+                />
               </label>
-            ) : null}
-            <label>
-              Team Code
-              <select value={teamForm.teamCode} onChange={(e) => setTeamForm((prev) => ({ ...prev, teamCode: e.target.value }))}>
-                <option value="" title="Clear assignment for this row">
-                  No team assigned
-                </option>
-                {teamOptions.map((team) => (
-                  <option key={team.code} value={team.code} title={team.name}>
-                    {team.code}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {teamForm.teamCode ? <div className="team-hint">{TEAM_NAME_MAP[teamForm.teamCode]}</div> : null}
+            ) : (
+              <>
+                {teamForm.teamType === "business" ? (
+                  <label>
+                    Business Group
+                    <select
+                      value={teamForm.businessGroup}
+                      onChange={(e) => setTeamForm((prev) => ({ ...prev, businessGroup: e.target.value, teamCode: "" }))}
+                    >
+                      <option value="All">All</option>
+                      {BUSINESS_GROUP_OPTIONS.map((group) => (
+                        <option key={group} value={group}>
+                          {group}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                <label>
+                  Team Code
+                  <select value={teamForm.teamCode} onChange={(e) => setTeamForm((prev) => ({ ...prev, teamCode: e.target.value }))}>
+                    <option value="" title="Clear assignment for this row">
+                      No team assigned
+                    </option>
+                    {teamOptions.map((team) => (
+                      <option key={team.code} value={team.code} title={team.name}>
+                        {team.code}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {teamForm.teamCode ? <div className="team-hint">{TEAM_NAME_MAP[teamForm.teamCode]}</div> : null}
+              </>
+            )}
             {teamAssignments[teamForm.rowIndex] ? (
               <button
                 type="button"
@@ -3155,38 +3191,54 @@ export default function App() {
       {menu?.type === "task" ? (
         <div
           onMouseDown={(e) => { if (e.target === e.currentTarget) setMenu(null); }}
+          onClick={(e) => e.stopPropagation()}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onMouseDown={(e) => e.stopPropagation()}>
+          <div onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
           <form onSubmit={createTask} className="form">
             <h3>Add Task</h3>
             <label>Source</label>
             <div style={{ display: "flex", marginBottom: 16, borderRadius: 8, overflow: "hidden", border: "1px solid #e5e7eb" }}>
               {[
-                { key: "existing", label: "Existing" },
-                { key: "new", label: "New" },
+                { key: "internal", label: "Internal", bg: "#374151" },
+                { key: "existing", label: "Existing", bg: "#1d4ed8" },
+                { key: "new", label: "New", bg: "#1d4ed8" },
               ].map((m) => (
                 <button key={m.key} type="button" onClick={() => {
-                  if (m.key === "existing") setTaskForm((prev) => ({ ...prev, source_mode: "existing", title: "" }));
+                  if (m.key === "internal") setTaskForm((prev) => ({ ...prev, source_mode: "internal", ticket_source: "internal", issue_key: "" }));
+                  else if (m.key === "existing") setTaskForm((prev) => ({ ...prev, source_mode: "existing", ticket_source: "jira", title: "" }));
                   else setTaskForm((prev) => ({ ...prev, source_mode: "new", issue_key: "", ticket_source: "jira", jira_issue_type: "", jira_project_key: prev.jira_project_key || (jiraProjects[0]?.key || "") }));
                 }}
                   style={{
                     flex: 1, padding: "9px 0", border: "none", cursor: "pointer",
-                    background: taskForm.source_mode === m.key ? "#1d4ed8" : "#f9fafb",
+                    background: taskForm.source_mode === m.key ? m.bg : "#f9fafb",
                     color: taskForm.source_mode === m.key ? "#fff" : "#6b7280",
                     fontWeight: 700, fontSize: 13, transition: "all 0.15s",
                   }}
                 >{m.label}</button>
               ))}
             </div>
-            {taskForm.source_mode === "existing" ? (
+            {taskForm.source_mode === "internal" ? (
+              <>
+                <label>
+                  Task Title
+                  <input
+                    value={taskForm.title}
+                    onChange={(e) => setTaskForm((prev) => ({ ...prev, title: e.target.value }))}
+                    placeholder="Enter task title"
+                    required
+                    autoFocus
+                  />
+                </label>
+              </>
+            ) : taskForm.source_mode === "existing" ? (
               <>
                 <label>Ticket System</label>
                 <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                  {["jira", "ado"].map((s) => (
+                  {["jira", "jira_net", "ado"].map((s) => (
                     <button key={s} type="button" onClick={() => setTaskForm((prev) => ({ ...prev, ticket_source: s, issue_key: "" }))}
                       style={{
                         flex: 1, padding: "8px 0", borderRadius: 6, cursor: "pointer",
@@ -3195,20 +3247,20 @@ export default function App() {
                         color: taskForm.ticket_source === s ? "#1d4ed8" : "#6b7280",
                         fontWeight: 700, fontSize: 13,
                       }}
-                    >{s.toUpperCase()}</button>
+                    >{s === "jira_net" ? "JIRA.net" : s.toUpperCase()}</button>
                   ))}
                 </div>
                 <label>
-                  {taskForm.ticket_source === "jira" ? "Issue Key" : "ADO Work Item (US only)"}
+                  {taskForm.ticket_source === "ado" ? "ADO Work Item (US only)" : "Issue Key"}
                   <input
                     value={taskForm.issue_key}
                     onChange={(e) =>
                       setTaskForm((prev) => ({
                         ...prev,
-                        issue_key: prev.ticket_source === "jira" ? e.target.value.toUpperCase() : e.target.value,
+                        issue_key: prev.ticket_source !== "ado" ? e.target.value.toUpperCase() : e.target.value,
                       }))
                     }
-                    placeholder={taskForm.ticket_source === "jira" ? "PROJ-123" : "US-12345 or 12345"}
+                    placeholder={taskForm.ticket_source === "ado" ? "US-12345 or 12345" : "PROJ-123"}
                     required
                   />
                 </label>
@@ -3366,12 +3418,13 @@ export default function App() {
       {menu?.type === "team-required" ? (
         <div
           onMouseDown={(e) => { if (e.target === e.currentTarget) setMenu(null); }}
+          onClick={(e) => e.stopPropagation()}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
           }}
         >
-          <div onMouseDown={(e) => e.stopPropagation()} style={{
+          <div onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()} style={{
             background: "white", borderRadius: "16px", padding: "28px 32px",
             boxShadow: "0 20px 60px rgba(0,0,0,0.25)", minWidth: "300px", textAlign: "center",
           }}>

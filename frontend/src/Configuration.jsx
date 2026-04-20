@@ -15,14 +15,24 @@ const JiraIcon = () => (
     <path d="M11.53 12h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47v-3.06a.47.47 0 00-.47-.47z" fill="#fff" opacity=".7"/>
   </svg>
 );
+const JiraNetIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+    <path d="M12.005 2C6.486 2 2.005 6.481 2.005 12s4.481 10 10 10 10-4.481 10-10-4.481-10-10-10z" fill="#0891b2"/>
+    <path d="M15.53 8h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47V8.47a.47.47 0 00-.47-.47z" fill="#fff"/>
+    <path d="M11.53 12h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47v-3.06a.47.47 0 00-.47-.47z" fill="#fff" opacity=".7"/>
+  </svg>
+);
 const AdoIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
     <path d="M2 17.25V6.75L10 2l8 4.75v4.3L10 14.5l-4-.04v3.8L2 17.25zM22 6.75v10.5L18 22l-6-4v-3l6 3.5v-6.5l-6-4V5l10 1.75z" fill="#0078D7"/>
   </svg>
 );
 
+function isJiraProvider(p) { return p === "jira" || p === "jira_net"; }
+
 const PROVIDERS = [
   { key: "jira", label: "Jira", icon: <JiraIcon /> },
+  { key: "jira_net", label: "JIRA.net", icon: <JiraNetIcon /> },
   { key: "ado", label: "Azure DevOps", icon: <AdoIcon /> },
 ];
 
@@ -73,7 +83,7 @@ export default function Configuration({ apiFetch, currentUser, onLogout, onBack 
       label: existing?.label || "",
       email: "",
       password: "",
-      jira_url: "",
+      jira_url: providerKey === "jira_net" ? "https://jira.homecredit.net/jira" : "",
       pat: "",
       ado_org: "",
     });
@@ -84,7 +94,7 @@ export default function Configuration({ apiFetch, currentUser, onLogout, onBack 
 
   async function handleSave() {
     setError("");
-    if (form.provider === "jira" && (!form.email.trim() || !form.password.trim())) {
+    if (isJiraProvider(form.provider) && (!form.email.trim() || !form.password.trim())) {
       setError("Email and password are required for Jira.");
       return;
     }
@@ -115,7 +125,7 @@ export default function Configuration({ apiFetch, currentUser, onLogout, onBack 
   async function handleTest() {
     setTestResult(null);
     setError("");
-    if (form.provider === "jira" && (!form.email.trim() || !form.password.trim())) {
+    if (isJiraProvider(form.provider) && (!form.email.trim() || !form.password.trim())) {
       setError("Fill in email and password before testing.");
       return;
     }
@@ -351,7 +361,7 @@ export default function Configuration({ apiFetch, currentUser, onLogout, onBack 
               />
             </div>
 
-            {form.provider === "jira" ? (
+            {isJiraProvider(form.provider) ? (
               <>
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Jira URL</label>

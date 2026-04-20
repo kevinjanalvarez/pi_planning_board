@@ -15,14 +15,24 @@ const JiraIcon = () => (
     <path d="M11.53 12h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47v-3.06a.47.47 0 00-.47-.47z" fill="#fff" opacity=".7"/>
   </svg>
 );
+const JiraNetIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+    <path d="M12.005 2C6.486 2 2.005 6.481 2.005 12s4.481 10 10 10 10-4.481 10-10-4.481-10-10-10z" fill="#0891b2"/>
+    <path d="M15.53 8h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47V8.47a.47.47 0 00-.47-.47z" fill="#fff"/>
+    <path d="M11.53 12h-3.06a.47.47 0 00-.47.47v3.06c0 .26.21.47.47.47h3.06c.26 0 .47-.21.47-.47v-3.06a.47.47 0 00-.47-.47z" fill="#fff" opacity=".7"/>
+  </svg>
+);
 const AdoIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
     <path d="M2 17.25V6.75L10 2l8 4.75v4.3L10 14.5l-4-.04v3.8L2 17.25zM22 6.75v10.5L18 22l-6-4v-3l6 3.5v-6.5l-6-4V5l10 1.75z" fill="#0078D7"/>
   </svg>
 );
 
+function isJiraProvider(p) { return p === "jira" || p === "jira_net"; }
+
 const PROVIDERS = [
   { key: "jira", label: "Jira", icon: <JiraIcon /> },
+  { key: "jira_net", label: "JIRA.net", icon: <JiraNetIcon /> },
   { key: "ado", label: "Azure DevOps", icon: <AdoIcon /> },
 ];
 
@@ -117,7 +127,9 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
     setEditProvider(existing ? providerKey : null);
     setCredForm({
       provider: providerKey, label: existing?.label || "",
-      email: "", password: "", jira_url: "", pat: "", ado_org: "",
+      email: "", password: "",
+      jira_url: providerKey === "jira_net" ? "https://jira.homecredit.net/jira" : "",
+      pat: "", ado_org: "",
     });
     setCredError("");
     setTestResult(null);
@@ -144,7 +156,7 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
 
   async function handleCredSave() {
     setCredError("");
-    if (!editProvider && credForm.provider === "jira" && (!credForm.email.trim() || !credForm.password.trim())) {
+    if (!editProvider && isJiraProvider(credForm.provider) && (!credForm.email.trim() || !credForm.password.trim())) {
       setCredError("Email and password are required for Jira."); return;
     }
     if (!editProvider && credForm.provider === "ado" && !credForm.pat.trim()) {
@@ -166,7 +178,7 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
 
   async function handleCredTest() {
     setTestResult(null); setCredError("");
-    if (!editProvider && credForm.provider === "jira" && (!credForm.email.trim() || !credForm.password.trim())) {
+    if (!editProvider && isJiraProvider(credForm.provider) && (!credForm.email.trim() || !credForm.password.trim())) {
       setCredError("Fill in email and password before testing."); return;
     }
     if (!editProvider && credForm.provider === "ado" && !credForm.pat.trim()) {
@@ -554,7 +566,7 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
               <input style={inputStyle} placeholder="e.g. My work account" value={credForm.label}
                 onChange={(e) => setCredForm((f) => ({ ...f, label: e.target.value }))} />
             </div>
-            {credForm.provider === "jira" ? (
+            {isJiraProvider(credForm.provider) ? (
               <>
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Jira URL</label>
