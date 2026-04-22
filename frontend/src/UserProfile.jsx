@@ -56,7 +56,7 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
   const [showCredModal, setShowCredModal] = useState(false);
   const [editProvider, setEditProvider] = useState(null);
   const [credForm, setCredForm] = useState({
-    provider: "jira", label: "", email: "", password: "", jira_url: "", pat: "", ado_org: "",
+    provider: "jira", label: "", email: "", password: "", jira_url: "", pat: "", ado_org: "", ado_project: "",
   });
   const [credSaving, setCredSaving] = useState(false);
   const [credError, setCredError] = useState("");
@@ -129,7 +129,7 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
       provider: providerKey, label: existing?.label || "",
       email: "", password: "",
       jira_url: providerKey === "jira_net" ? "https://jira.homecredit.net/jira" : "",
-      pat: "", ado_org: "",
+      pat: "", ado_org: "", ado_project: "",
     });
     setCredError("");
     setTestResult(null);
@@ -146,6 +146,7 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
             email: d.email || "",
             jira_url: d.jira_url || "",
             ado_org: d.ado_org || "",
+            ado_project: d.ado_project || "",
             password: "",
             pat: "",
           }));
@@ -590,6 +591,11 @@ export default function UserProfile({ apiFetch, currentUser, onLogout, onBack, o
                   <label style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Organization</label>
                   <input style={inputStyle} placeholder="your-org-name" value={credForm.ado_org}
                     onChange={(e) => setCredForm((f) => ({ ...f, ado_org: e.target.value }))} />
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Project</label>
+                  <input style={inputStyle} placeholder="your-project-name" value={credForm.ado_project}
+                    onChange={(e) => setCredForm((f) => ({ ...f, ado_project: e.target.value }))} />
                 </div>
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Personal Access Token</label>

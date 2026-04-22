@@ -64,7 +64,7 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
   const [userCreds, setUserCreds] = useState([]); // credentials for the user being edited
   const [credsLoading, setCredsLoading] = useState(false);
   const [showCredForm, setShowCredForm] = useState(null); // provider key or null
-  const [credForm, setCredForm] = useState({ label: "", email: "", password: "", jira_url: "", pat: "", ado_org: "" });
+  const [credForm, setCredForm] = useState({ label: "", email: "", password: "", jira_url: "", pat: "", ado_org: "", ado_project: "" });
   const [credSaving, setCredSaving] = useState(false);
   const [credError, setCredError] = useState("");
 
@@ -224,7 +224,7 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
     const existing = userCreds.find((c) => c.provider === providerKey);
     setCredForm({ label: existing?.label || "", email: "", password: "",
       jira_url: providerKey === "jira_net" ? "https://jira.homecredit.net/jira" : "",
-      pat: "", ado_org: "" });
+      pat: "", ado_org: "", ado_project: "" });
     setCredError("");
     setShowCredForm(providerKey);
   }
@@ -805,6 +805,11 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
                           <span style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Organization</span>
                           <input style={{ ...inputStyle, padding: "8px 10px", fontSize: 13 }} placeholder="your-org-name" value={credForm.ado_org}
                             onChange={(e) => setCredForm((f) => ({ ...f, ado_org: e.target.value }))} />
+                        </label>
+                        <label style={{ display: "block", marginBottom: 10 }}>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Project</span>
+                          <input style={{ ...inputStyle, padding: "8px 10px", fontSize: 13 }} placeholder="your-project-name" value={credForm.ado_project}
+                            onChange={(e) => setCredForm((f) => ({ ...f, ado_project: e.target.value }))} />
                         </label>
                         <label style={{ display: "block", marginBottom: 10 }}>
                           <span style={{ fontSize: 12, fontWeight: 600, color: "#374151" }}>Personal Access Token</span>

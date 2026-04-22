@@ -10,6 +10,10 @@ import requests
 from openai import AzureOpenAI
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
+
+# Load .env BEFORE any app imports so DB_PATH and other settings are available
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, Query, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -74,8 +78,6 @@ from app.db import (
     fetch_credential,
     delete_credential,
 )
-
-load_dotenv()
 
 # ── Encryption config (for credential storage) ──────────────────────────
 _FERNET_KEY = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
@@ -515,22 +517,16 @@ def _jira_ssl_verify() -> bool | str:
 def _get_ado_connection_settings(user_id: int | None = None) -> tuple[str, str, str]:
     """Return (organization, project, pat) for Azure DevOps."""
     organization = ""
+    project = ""
     pat = ""
 
-    # Try DB credentials first
+    # Read from DB credentials
     if user_id:
         cred = _decrypt_user_credential(user_id, "ado")
         if cred:
             organization = (cred.get("ado_org") or "").strip()
+            project = (cred.get("ado_project") or "").strip()
             pat = (cred.get("pat") or "").strip()
-
-    # Fall back to env vars
-    if not organization:
-        organization = (os.getenv("AZURE_ORG") or "").strip()
-    if not pat:
-        pat = (os.getenv("AZURE_PAT") or "").strip()
-
-    project = (os.getenv("AZURE_PROJECT") or "").strip()
 
     return organization, project, pat
 
@@ -745,7 +741,7 @@ def _build_ado_work_item_web_link(work_item_key: str, user_id: int | None = None
 
     base_url = (os.getenv("ADO_BASE_URL") or "https://dev.azure.com").rstrip("/")
     if not organization or not project:
-        raise HTTPException(status_code=500, detail="AZURE_ORG and AZURE_PROJECT must be configured for ADO web links")
+        raise HTTPException(status_code=500, detail="ADO organization and project must be configured in your credentials")
 
     url = f"{base_url}/{organization}/{project}/_workitems/edit/{work_item_id}"
     return url, f"ADO {work_item_id}"
@@ -911,11 +907,29 @@ app = FastAPI(title="Program Planning Board API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("CORS_ORIGIN", "http://localhost:3000")],
+    allow_origin_regex=r"^https?://.*$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    """Ensure unhandled exceptions (500s) always include CORS headers,
+    so the browser never masks the real error as a CORS failure."""
+    from starlette.responses import JSONResponse
+    origin = request.headers.get("origin", "")
+    headers = {}
+    if origin:
+        headers["access-control-allow-origin"] = origin
+        headers["access-control-allow-credentials"] = "true"
+        headers["vary"] = "Origin"
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+        headers=headers,
+    )
 
 
 # ── Auth guard middleware ────────────────────────────────────────────────
@@ -925,10 +939,9 @@ _PUBLIC_PATHS = {"/health", "/api/auth/login", "/api/auth/register"}
 def _auth_error_response(request: Request, status_code: int, detail: str):
     """Return a JSON error with CORS headers so browsers can read it cross-origin."""
     from starlette.responses import JSONResponse
-    cors_origin = os.getenv("CORS_ORIGIN", "")
     origin = request.headers.get("origin", "")
     headers = {}
-    if origin and cors_origin and origin == cors_origin:
+    if origin:
         headers["access-control-allow-origin"] = origin
         headers["access-control-allow-credentials"] = "true"
         headers["vary"] = "Origin"
@@ -1752,6 +1765,7 @@ class CredentialRequest(BaseModel):
     # Azure DevOps fields
     pat: str | None = None
     ado_org: str | None = None
+    ado_project: str | None = None
 
 
 @app.get("/api/admin/users/{user_id}/credentials")
@@ -1779,7 +1793,7 @@ def admin_save_user_credential(user_id: int, provider: str, body: CredentialRequ
     else:
         if not body.pat:
             raise HTTPException(status_code=400, detail="Azure DevOps requires a PAT")
-        secret_payload = _json.dumps({"pat": body.pat, "ado_org": body.ado_org or ""})
+        secret_payload = _json.dumps({"pat": body.pat, "ado_org": body.ado_org or "", "ado_project": body.ado_project or ""})
 
     encrypted = _fernet.encrypt(secret_payload.encode()).decode()
     result = upsert_credential(user_id, provider, encrypted, body.label)
@@ -2241,6 +2255,7 @@ def get_credential_details(provider: str, user: dict = Depends(get_current_user)
             "provider": "ado",
             "label": cred.get("label", ""),
             "ado_org": decrypted.get("ado_org", ""),
+            "ado_project": decrypted.get("ado_project", ""),
             "pat_masked": ("•" * max(0, len(pat) - 4)) + pat[-4:] if len(pat) > 4 else "•" * len(pat),
         }
 
@@ -2278,11 +2293,13 @@ def save_credential(provider: str, body: CredentialRequest, user: dict = Depends
     else:
         pat = body.pat or stored_decrypted.get("pat", "")
         ado_org = body.ado_org or stored_decrypted.get("ado_org", "")
+        ado_project = body.ado_project or stored_decrypted.get("ado_project", "")
         if not pat:
             raise HTTPException(status_code=400, detail="Azure DevOps requires a PAT")
         secret_payload = _json.dumps({
             "pat": pat,
             "ado_org": ado_org,
+            "ado_project": ado_project,
         })
 
     encrypted = _fernet.encrypt(secret_payload.encode()).decode()
@@ -2331,7 +2348,7 @@ def credentials_health(user: dict = Depends(get_current_user)) -> dict:
                 else:
                     results[provider] = {"status": "failed", "message": f"HTTP {resp.status_code}"}
             elif provider == "ado":
-                ado_org = decrypted.get("ado_org") or os.getenv("ADO_ORG", "")
+                ado_org = decrypted.get("ado_org") or ""
                 if not ado_org:
                     results[provider] = {"status": "failed", "message": "No ADO organization configured"}
                     continue
@@ -2360,6 +2377,7 @@ def test_credential(provider: str, body: CredentialRequest, user: dict = Depends
     password = body.password or ""
     pat = body.pat or ""
     ado_org = body.ado_org or ""
+    ado_project = body.ado_project or ""
     jira_url = body.jira_url or ""
 
     if (_is_jira_provider(provider) and not password) or (provider == "ado" and not pat):
@@ -2374,6 +2392,7 @@ def test_credential(provider: str, body: CredentialRequest, user: dict = Depends
                 else:
                     pat = pat or decrypted.get("pat", "")
                     ado_org = ado_org or decrypted.get("ado_org", "")
+                    ado_project = ado_project or decrypted.get("ado_project", "")
             except Exception:
                 return {"status": "failed", "message": "Could not decrypt stored credential"}
 
@@ -2403,7 +2422,6 @@ def test_credential(provider: str, body: CredentialRequest, user: dict = Depends
     else:  # ado
         if not pat:
             raise HTTPException(status_code=400, detail="Azure DevOps requires a PAT")
-        ado_org = ado_org or os.getenv("ADO_ORG", "")
         if not ado_org:
             raise HTTPException(status_code=400, detail="Azure DevOps organization is required")
         try:

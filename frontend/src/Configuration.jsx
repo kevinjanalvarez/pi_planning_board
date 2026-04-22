@@ -49,6 +49,7 @@ export default function Configuration({ apiFetch, currentUser, onLogout, onBack 
     jira_url: "",
     pat: "",
     ado_org: "",
+    ado_project: "",
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -86,6 +87,7 @@ export default function Configuration({ apiFetch, currentUser, onLogout, onBack 
       jira_url: providerKey === "jira_net" ? "https://jira.homecredit.net/jira" : "",
       pat: "",
       ado_org: "",
+      ado_project: "",
     });
     setError("");
     setTestResult(null);
@@ -403,6 +405,15 @@ export default function Configuration({ apiFetch, currentUser, onLogout, onBack 
                     placeholder="your-org-name"
                     value={form.ado_org}
                     onChange={(e) => setForm((f) => ({ ...f, ado_org: e.target.value }))}
+                  />
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <label style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Project</label>
+                  <input
+                    style={inputStyle}
+                    placeholder="your-project-name"
+                    value={form.ado_project}
+                    onChange={(e) => setForm((f) => ({ ...f, ado_project: e.target.value }))}
                   />
                 </div>
                 <div style={{ marginBottom: 12 }}>
