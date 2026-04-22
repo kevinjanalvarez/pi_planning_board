@@ -28,12 +28,20 @@ const AdoIcon = () => (
   </svg>
 );
 
-function isJiraProvider(p) { return p === "jira" || p === "jira_net"; }
+const ItsdIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" fill="#dc2626"/>
+    <path d="M13 7h-2v5.414l3.293 3.293 1.414-1.414L13 11.586V7z" fill="#fff"/>
+  </svg>
+);
+
+function isJiraProvider(p) { return p === "jira" || p === "jira_net" || p === "itsd"; }
 
 const PROVIDERS = [
   { key: "jira", label: "Jira", icon: <JiraIcon /> },
   { key: "jira_net", label: "JIRA.net", icon: <JiraNetIcon /> },
   { key: "ado", label: "Azure DevOps", icon: <AdoIcon /> },
+  { key: "itsd", label: "ITSD", icon: <ItsdIcon /> },
 ];
 
 export default function Configuration({ apiFetch, currentUser, onLogout, onBack }) {
@@ -84,7 +92,7 @@ export default function Configuration({ apiFetch, currentUser, onLogout, onBack 
       label: existing?.label || "",
       email: "",
       password: "",
-      jira_url: providerKey === "jira_net" ? "https://jira.homecredit.net/jira" : "",
+      jira_url: providerKey === "jira_net" ? "https://jira.homecredit.net/jira" : providerKey === "itsd" ? "https://itservicedesk.homecredit.ph" : "",
       pat: "",
       ado_org: "",
       ado_project: "",

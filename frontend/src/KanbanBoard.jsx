@@ -106,7 +106,7 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
   const [newCardTitle, setNewCardTitle] = useState("");
   const [newCardDesc, setNewCardDesc] = useState("");
   const [newCardAssignee, setNewCardAssignee] = useState("");
-  const [addCardMode, setAddCardMode] = useState("internal"); // "internal" | "jira" | "jira_net" | "ado"
+  const [addCardMode, setAddCardMode] = useState("internal"); // "internal" | "jira" | "jira_net" | "ado" | "itsd"
   const [ticketKey, setTicketKey] = useState("");
   const [ticketLookup, setTicketLookup] = useState(null); // fetched ticket info
   const [ticketLoading, setTicketLoading] = useState(false);
@@ -205,7 +205,7 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
     setTicketError("");
     setTicketLookup(null);
     try {
-      const src = addCardMode; // "jira", "jira_net", or "ado"
+      const src = addCardMode; // "jira", "jira_net", "ado", or "itsd"
       const res = await apiFetch(`${API_BASE}/api/kanban/ticket-lookup?key=${encodeURIComponent(ticketKey.trim())}&source=${src}`);
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -224,7 +224,7 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
 
   async function addCard() {
     if (!addCardColId || !newCardTitle.trim()) return;
-    const isExternal = (addCardMode === "jira" || addCardMode === "jira_net" || addCardMode === "ado") && ticketLookup;
+    const isExternal = (addCardMode === "jira" || addCardMode === "jira_net" || addCardMode === "ado" || addCardMode === "itsd") && ticketLookup;
 
     // Determine target column via tone map
     let targetColId = addCardColId;
@@ -613,9 +613,9 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                 <div style={{ padding: "8px 10px", flex: 1, overflowY: "auto" }}>
                   {colCards.map((card) => {
                     const isExternal = !!card.issue_key;
-                    const sourceLabel = !isExternal ? "Internal" : card.ticket_source === "ado" ? "ADO" : card.ticket_source === "jira_net" ? "JIRA.net" : "JIRA";
-                    const sourceBg = !isExternal ? "#e5e7eb" : card.ticket_source === "ado" ? "#fef3c7" : card.ticket_source === "jira_net" ? "#cffafe" : "#dbeafe";
-                    const sourceColor = !isExternal ? "#6b7280" : card.ticket_source === "ado" ? "#92400e" : card.ticket_source === "jira_net" ? "#0891b2" : "#1d4ed8";
+                    const sourceLabel = !isExternal ? "Internal" : card.ticket_source === "ado" ? "ADO" : card.ticket_source === "itsd" ? "ITSD" : card.ticket_source === "jira_net" ? "JIRA.net" : "JIRA";
+                    const sourceBg = !isExternal ? "#e5e7eb" : card.ticket_source === "ado" ? "#fef3c7" : card.ticket_source === "itsd" ? "#fee2e2" : card.ticket_source === "jira_net" ? "#cffafe" : "#dbeafe";
+                    const sourceColor = !isExternal ? "#6b7280" : card.ticket_source === "ado" ? "#92400e" : card.ticket_source === "itsd" ? "#dc2626" : card.ticket_source === "jira_net" ? "#0891b2" : "#1d4ed8";
                     const sourceIcon = !isExternal
                       ? /* board icon */ <svg width="10" height="10" viewBox="0 0 24 24" fill={sourceColor}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
                       : card.ticket_source === "ado"
@@ -947,11 +947,12 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                   { key: "jira", label: "JIRA" },
                   { key: "jira_net", label: "JIRA.net" },
                   { key: "ado", label: "ADO" },
+                  { key: "itsd", label: "ITSD" },
                 ].map((m) => (
                   <button key={m.key} type="button" onClick={() => { setAddCardMode(m.key); setTicketLookup(null); setTicketError(""); setTicketKey(""); setNewCardDesc(""); setNewCardAssignee(""); }}
                     style={{
                       flex: 1, padding: "9px 0", border: "none", cursor: "pointer",
-                      background: addCardMode === m.key ? (m.key === "internal" ? "#374151" : m.key === "jira" ? "#1d4ed8" : m.key === "jira_net" ? "#0891b2" : "#b45309") : "#f9fafb",
+                      background: addCardMode === m.key ? (m.key === "internal" ? "#374151" : m.key === "jira" ? "#1d4ed8" : m.key === "jira_net" ? "#0891b2" : m.key === "itsd" ? "#dc2626" : "#b45309") : "#f9fafb",
                       color: addCardMode === m.key ? "#fff" : "#6b7280",
                       fontWeight: 700, fontSize: 13, transition: "all 0.15s",
                     }}
@@ -994,7 +995,7 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
               )}
 
               {/* ── JIRA / ADO mode ── */}
-              {(addCardMode === "jira" || addCardMode === "jira_net" || addCardMode === "ado") && (
+              {(addCardMode === "jira" || addCardMode === "jira_net" || addCardMode === "ado" || addCardMode === "itsd") && (
                 <>
                   {/* Lookup input */}
                   <label>
@@ -1025,10 +1026,10 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                   {/* Ticket preview card — shown after lookup */}
                   {ticketLookup && (() => {
                     const src = ticketLookup.source || addCardMode;
-                    const isJira = src === "jira" || src === "jira_net";
-                    const badgeBg = isJira ? (src === "jira_net" ? "#cffafe" : "#dbeafe") : "#fef3c7";
-                    const badgeColor = isJira ? (src === "jira_net" ? "#0891b2" : "#1d4ed8") : "#92400e";
-                    const badgeLabel = src === "jira_net" ? "JIRA.net" : (isJira ? "JIRA" : "ADO");
+                    const isJira = src === "jira" || src === "jira_net" || src === "itsd";
+                    const badgeBg = isJira ? (src === "itsd" ? "#fee2e2" : src === "jira_net" ? "#cffafe" : "#dbeafe") : "#fef3c7";
+                    const badgeColor = isJira ? (src === "itsd" ? "#dc2626" : src === "jira_net" ? "#0891b2" : "#1d4ed8") : "#92400e";
+                    const badgeLabel = src === "itsd" ? "ITSD" : src === "jira_net" ? "JIRA.net" : (isJira ? "JIRA" : "ADO");
                     const badgeIcon = isJira
                       ? <svg width="12" height="12" viewBox="0 0 24 24" fill={badgeColor}><path d="M12.005 2c-5.52 0-10 4.48-10 10s4.48 10 10 10 10-4.48 10-10-4.48-10-10-10zm0 3.6v2.9h5.4v2.5h-5.4v2.85L7.605 10l4.4-4.4z"/></svg>
                       : <svg width="12" height="12" viewBox="0 0 24 24" fill={badgeColor}><path d="M22 4v9.4L17.6 18l-6.1-2.1v4.6L7.4 16l12.2-1V4H22zM2 7.8l4.5-2.2L18 4v16l-11.5-2L2 15.6V7.8z"/></svg>;
@@ -1226,9 +1227,9 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
       {viewCard && (() => {
         const card = viewCard;
         const isExternal = !!card.issue_key;
-        const sourceLabel = !isExternal ? "Internal" : card.ticket_source === "ado" ? "ADO" : card.ticket_source === "jira_net" ? "JIRA.net" : "JIRA";
-        const sourceBg = !isExternal ? "#e5e7eb" : card.ticket_source === "ado" ? "#fef3c7" : card.ticket_source === "jira_net" ? "#cffafe" : "#dbeafe";
-        const sourceColor = !isExternal ? "#6b7280" : card.ticket_source === "ado" ? "#92400e" : card.ticket_source === "jira_net" ? "#0891b2" : "#1d4ed8";
+        const sourceLabel = !isExternal ? "Internal" : card.ticket_source === "ado" ? "ADO" : card.ticket_source === "itsd" ? "ITSD" : card.ticket_source === "jira_net" ? "JIRA.net" : "JIRA";
+        const sourceBg = !isExternal ? "#e5e7eb" : card.ticket_source === "ado" ? "#fef3c7" : card.ticket_source === "itsd" ? "#fee2e2" : card.ticket_source === "jira_net" ? "#cffafe" : "#dbeafe";
+        const sourceColor = !isExternal ? "#6b7280" : card.ticket_source === "ado" ? "#92400e" : card.ticket_source === "itsd" ? "#dc2626" : card.ticket_source === "jira_net" ? "#0891b2" : "#1d4ed8";
         const statusTone = card.external_status ? getStatusTone(card.external_status) : null;
         const toneColors = {
           done: { bg: "#dcfce7", color: "#15803d" },

@@ -172,8 +172,8 @@ SOURCE_JIRA = "jira"
 SOURCE_ADO = "ado"
 
 # All valid credential providers and jira-type helper
-_VALID_PROVIDERS = {"jira", "jira_net", "ado"}
-_JIRA_PROVIDERS = {"jira", "jira_net"}
+_VALID_PROVIDERS = {"jira", "jira_net", "ado", "itsd"}
+_JIRA_PROVIDERS = {"jira", "jira_net", "itsd"}
 
 def _is_jira_provider(provider: str) -> bool:
     return provider in _JIRA_PROVIDERS
@@ -186,13 +186,15 @@ def source_tile_color(source: str) -> str:
         return "#2563eb"
     if source == "jira_net":
         return "#0891b2"
+    if source == "itsd":
+        return "#7c3aed"
     return "#475569"
 
 
 class CreateMilestoneRequest(BaseModel):
     board_id: int
     issue_key: str | None = None
-    ticket_source: str = Field(SOURCE_JIRA, pattern=r"^(jira|jira_net|ado)$")
+    ticket_source: str = Field(SOURCE_JIRA, pattern=r"^(jira|jira_net|ado|itsd)$")
     title: str | None = None
     target_date: date
     end_date: date
@@ -212,7 +214,7 @@ class CreateTaskRequest(BaseModel):
     jira_project_key: str | None = None
     jira_issue_type: str | None = None
     jira_extra_fields: dict | None = None
-    ticket_source: str = Field(SOURCE_JIRA, pattern=r"^(jira|jira_net|ado|internal)$")
+    ticket_source: str = Field(SOURCE_JIRA, pattern=r"^(jira|jira_net|ado|itsd|internal)$")
     row_index: int = Field(..., ge=1, le=10)
     start_slot: int = Field(..., ge=0)
     end_slot: int = Field(..., ge=0)
@@ -377,8 +379,8 @@ def fetch_jira_summary(issue_key: str, user_id: int | None = None) -> str:
     return issue["summary"]
 
 
-def fetch_jira_projects(user_id: int | None = None) -> list[dict]:
-    jira_base, auth, verify = _get_jira_connection_settings(user_id)
+def fetch_jira_projects(user_id: int | None = None, provider: str = "jira") -> list[dict]:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id, provider=provider)
     endpoint = f"{jira_base}/rest/api/2/project"
 
     try:
@@ -410,8 +412,8 @@ def fetch_jira_projects(user_id: int | None = None) -> list[dict]:
     return normalized
 
 
-def create_jira_issue(summary: str, issue_type_name: str = "Task", project_key: str | None = None, extra_fields: dict | None = None, user_id: int | None = None) -> dict:
-    jira_base, auth, verify = _get_jira_connection_settings(user_id)
+def create_jira_issue(summary: str, issue_type_name: str = "Task", project_key: str | None = None, extra_fields: dict | None = None, user_id: int | None = None, provider: str = "jira") -> dict:
+    jira_base, auth, verify = _get_jira_connection_settings(user_id, provider=provider)
     resolved_project_key = (project_key or os.getenv("JIRA_PROJECT_KEY") or "").strip().upper()
     if not resolved_project_key:
         raise HTTPException(status_code=400, detail="JIRA project key is required")
@@ -484,6 +486,10 @@ def _get_jira_connection_settings(user_id: int | None = None, provider: str = "j
             jira_base = (cred.get("jira_url") or "").rstrip("/")
             username = cred.get("email") or ""
             token = cred.get("password") or ""
+
+    # Default URL for ITSD if not stored in credential
+    if provider == "itsd" and not jira_base:
+        jira_base = "https://itservicedesk.homecredit.ph"
 
     # Fall back to env vars if DB didn't provide values (only for "jira" provider)
     if provider == "jira":
@@ -786,8 +792,9 @@ def _extract_ado_text(value: object) -> str | None:
 
 def _normalize_ticket_source(value: str | None) -> str:
     normalized = (value or SOURCE_JIRA).strip().lower()
-    if normalized not in _VALID_PROVIDERS and normalized != "internal":
-        raise HTTPException(status_code=400, detail=f"ticket_source must be one of {sorted(_VALID_PROVIDERS | {'internal'})}")
+    _valid_sources = _VALID_PROVIDERS | {"internal"}
+    if normalized not in _valid_sources:
+        raise HTTPException(status_code=400, detail=f"ticket_source must be one of {sorted(_valid_sources)}")
     return normalized
 
 
@@ -1107,13 +1114,13 @@ def get_board(board_id: int = Query(...), refresh_external: bool = Query(False),
 
 
 @app.get("/api/jira/projects")
-def get_jira_projects_endpoint(user: dict = Depends(get_current_user)) -> dict:
-    return {"projects": fetch_jira_projects(user["id"])}
+def get_jira_projects_endpoint(source: str = Query("jira", pattern="^(jira|jira_net|itsd)$"), user: dict = Depends(get_current_user)) -> dict:
+    return {"projects": fetch_jira_projects(user["id"], provider=source)}
 
 
 @app.get("/api/jira/projects/{project_key}/issue-types")
-def get_jira_project_issue_types(project_key: str, user: dict = Depends(get_current_user)) -> dict:
-    jira_base, auth, verify = _get_jira_connection_settings(user["id"])
+def get_jira_project_issue_types(project_key: str, source: str = Query("jira", pattern="^(jira|jira_net|itsd)$"), user: dict = Depends(get_current_user)) -> dict:
+    jira_base, auth, verify = _get_jira_connection_settings(user["id"], provider=source)
     key = project_key.strip().upper()
     if not key:
         raise HTTPException(status_code=400, detail="Project key is required")
@@ -1196,10 +1203,11 @@ def get_jira_field_options(
     project_key: str = Query(...),
     issue_type: str = Query("Task"),
     field_name: str = Query(...),
+    source: str = Query("jira", pattern="^(jira|jira_net|itsd)$"),
     user: dict = Depends(get_current_user),
 ) -> dict:
     """Discover field by name via /rest/api/2/field, then fetch its options via multiple fallbacks."""
-    jira_base, auth, verify = _get_jira_connection_settings(user["id"])
+    jira_base, auth, verify = _get_jira_connection_settings(user["id"], provider=source)
     field_lower = field_name.strip().lower()
     key = project_key.strip().upper()
     if not key or not field_lower:
@@ -1478,6 +1486,7 @@ def create_task(payload: CreateTaskRequest, user: dict = Depends(get_current_use
                     project_key=payload.jira_project_key,
                     extra_fields=payload.jira_extra_fields,
                     user_id=user["id"],
+                    provider=ticket_source,
                 )
                 jira_created = True
                 jira_created_issue_key = created["issue_key"]
@@ -1503,7 +1512,7 @@ def create_task(payload: CreateTaskRequest, user: dict = Depends(get_current_use
     if not title:
         raise HTTPException(status_code=400, detail="Task title is required when issue key is not provided")
 
-    system_label = "Internal" if ticket_source == "internal" else ("JIRA.net" if ticket_source == "jira_net" else ("JIRA" if ticket_source == SOURCE_JIRA else "Azure DevOps"))
+    system_label = "Internal" if ticket_source == "internal" else ("ITSD" if ticket_source == "itsd" else ("JIRA.net" if ticket_source == "jira_net" else ("JIRA" if ticket_source == SOURCE_JIRA else "Azure DevOps")))
     item = insert_item(
         {
             "issue_key": issue_key or None,
@@ -1756,7 +1765,7 @@ def update_profile(payload: ProfileUpdateRequest, user: dict = Depends(get_curre
 # ── Admin credential management ─────────────────────────────────────────
 
 class CredentialRequest(BaseModel):
-    provider: str = Field(..., pattern=r"^(jira|jira_net|ado)$")
+    provider: str = Field(..., pattern=r"^(jira|jira_net|ado|itsd)$")
     label: str | None = None
     # Jira fields
     email: str | None = None
@@ -1826,7 +1835,7 @@ class KanbanCardRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
     color: str = "#1f6688"
     issue_key: str | None = None
-    ticket_source: str | None = Field(None, pattern="^(jira|jira_net|ado)$")
+    ticket_source: str | None = Field(None, pattern="^(jira|jira_net|ado|itsd)$")
     description: str | None = None
     assignee: str | None = None
     external_status: str | None = None
@@ -1841,8 +1850,8 @@ class KanbanCardMoveRequest(BaseModel):
 
 
 @app.get("/api/kanban/ticket-lookup")
-def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Query(..., pattern="^(jira|jira_net|ado)$"), user: dict = Depends(get_current_user)) -> dict:
-    """Fetch ticket info from JIRA, JIRA.net, or ADO by exact key."""
+def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Query(..., pattern="^(jira|jira_net|ado|itsd)$"), user: dict = Depends(get_current_user)) -> dict:
+    """Fetch ticket info from JIRA, JIRA.net, ITSD, or ADO by exact key."""
     try:
         if _is_jira_provider(source):
             ticket = fetch_jira_issue(key.strip(), user["id"], provider=source)
@@ -1865,7 +1874,7 @@ def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Quer
     except HTTPException:
         raise
     except Exception as e:
-        src_label = "JIRA.net" if source == "jira_net" else ("JIRA" if source == "jira" else ("Internal" if source == "internal" else "ADO"))
+        src_label = "ITSD" if source == "itsd" else ("JIRA.net" if source == "jira_net" else ("JIRA" if source == "jira" else ("Internal" if source == "internal" else "ADO")))
         raise HTTPException(status_code=404, detail=f"Could not find {src_label} ticket '{key}'. Check the key and your integration credentials.")
 
 

@@ -732,6 +732,10 @@ body {
   background-image: linear-gradient(rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.58));
 }
 
+.ticket-source-itsd {
+  background-image: linear-gradient(rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.58));
+}
+
 .ticket-source-internal {
   background-image: linear-gradient(rgba(255, 255, 255, 0.58), rgba(255, 255, 255, 0.58));
 }

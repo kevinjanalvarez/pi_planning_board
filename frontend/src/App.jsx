@@ -207,17 +207,8 @@ function formatIssueKey(item) {
 }
 
 function getTileColor(item) {
-  const source = (item?.ticket_source || "").toLowerCase();
-  if (source === "ado") {
-    return "#7c6bb3";
-  }
-  if (source === "jira") {
-    return "#2563eb";
-  }
-  if (source === "jira_net") {
-    return "#0891b2";
-  }
-  return item?.color;
+  if (item?.item_type === "MILESTONE" || item?.item_type === "IDEA") return item?.color;
+  return "#475569";
 }
 
 function getTicketLabel(item) {
@@ -238,7 +229,7 @@ function getTicketLabel(item) {
 
 function getTicketMetaLine(item) {
   const source = (item?.ticket_source || "").toLowerCase();
-  if (source !== "jira" && source !== "jira_net" && source !== "ado") {
+  if (source !== "jira" && source !== "jira_net" && source !== "ado" && source !== "itsd") {
     return "";
   }
   const parts = [];
@@ -802,7 +793,7 @@ export default function App() {
     async function loadJiraProjects() {
       setJiraProjectsLoading(true);
       try {
-        const res = await apiFetch(`${API_BASE}/api/jira/projects`);
+        const res = await apiFetch(`${API_BASE}/api/jira/projects?source=${taskForm.ticket_source}`);
         if (!res.ok) {
           const body = await res.json();
           throw new Error(body.detail || "Could not load JIRA projects");
@@ -826,7 +817,7 @@ export default function App() {
     if (
       menu?.type === "task" &&
       taskForm.source_mode === "new" &&
-      taskForm.ticket_source === "jira" &&
+      (taskForm.ticket_source === "jira" || taskForm.ticket_source === "itsd") &&
       !jiraProjects.length &&
       !jiraProjectsLoading
     ) {
@@ -839,12 +830,12 @@ export default function App() {
     if (
       menu?.type === "task" &&
       taskForm.source_mode === "new" &&
-      taskForm.ticket_source === "jira" &&
+      (taskForm.ticket_source === "jira" || taskForm.ticket_source === "itsd") &&
       taskForm.jira_project_key
     ) {
       setJiraIssueTypesLoading(true);
       setJiraIssueTypes([]);
-      apiFetch(`${API_BASE}/api/jira/projects/${taskForm.jira_project_key}/issue-types`)
+      apiFetch(`${API_BASE}/api/jira/projects/${taskForm.jira_project_key}/issue-types?source=${taskForm.ticket_source}`)
         .then((r) => r.json())
         .then((data) => {
           const types = Array.isArray(data.issue_types) ? data.issue_types : [];
@@ -872,7 +863,7 @@ export default function App() {
       setJiraServiceLoading(true);
       setJiraServiceOptions([]);
       apiFetch(
-        `${API_BASE}/api/jira/field-options?project_key=MAP&issue_type=Task&field_name=service`
+        `${API_BASE}/api/jira/field-options?project_key=MAP&issue_type=Task&field_name=service&source=${taskForm.ticket_source}`
       )
         .then((r) => r.json())
         .then((data) => {
@@ -1197,7 +1188,7 @@ export default function App() {
 
       const isMapProject =
         taskForm.source_mode === "new" &&
-        taskForm.ticket_source === "jira" &&
+        (taskForm.ticket_source === "jira" || taskForm.ticket_source === "itsd") &&
         taskForm.jira_project_key.toUpperCase() === "MAP";
 
       const jiraExtraFields =
@@ -1210,9 +1201,9 @@ export default function App() {
         title: taskForm.source_mode === "new" || taskForm.source_mode === "internal" ? taskForm.title : "",
         issue_key: taskForm.source_mode === "existing" ? taskForm.issue_key || null : null,
         jira_project_key:
-          taskForm.source_mode === "new" && taskForm.ticket_source === "jira" ? taskForm.jira_project_key || null : null,
+          taskForm.source_mode === "new" && (taskForm.ticket_source === "jira" || taskForm.ticket_source === "itsd") ? taskForm.jira_project_key || null : null,
         jira_issue_type:
-          taskForm.source_mode === "new" && taskForm.ticket_source === "jira" ? taskForm.jira_issue_type || null : null,
+          taskForm.source_mode === "new" && (taskForm.ticket_source === "jira" || taskForm.ticket_source === "itsd") ? taskForm.jira_issue_type || null : null,
         jira_extra_fields: jiraExtraFields,
         ticket_source: taskForm.source_mode === "internal" ? "internal" : taskForm.ticket_source,
         row_index: taskForm.row_index,
@@ -3238,7 +3229,7 @@ export default function App() {
               <>
                 <label>Ticket System</label>
                 <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                  {["jira", "jira_net", "ado"].map((s) => (
+                  {["jira", "jira_net", "ado", "itsd"].map((s) => (
                     <button key={s} type="button" onClick={() => setTaskForm((prev) => ({ ...prev, ticket_source: s, issue_key: "" }))}
                       style={{
                         flex: 1, padding: "8px 0", borderRadius: 6, cursor: "pointer",
@@ -3271,7 +3262,7 @@ export default function App() {
                 <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
                   {["jira", "ado"].map((s) => (
                     <button key={s} type="button" onClick={() => {
-                      if (s === "jira") setTaskForm((prev) => ({ ...prev, ticket_source: "jira", jira_project_key: prev.jira_project_key || (jiraProjects[0]?.key || "") }));
+                      if (s === "jira" || s === "itsd") setTaskForm((prev) => ({ ...prev, ticket_source: s, jira_project_key: prev.jira_project_key || (jiraProjects[0]?.key || "") }));
                       else setTaskForm((prev) => ({ ...prev, ticket_source: "ado" }));
                     }}
                       style={{
@@ -3284,7 +3275,7 @@ export default function App() {
                     >{s.toUpperCase()}</button>
                   ))}
                 </div>
-                {taskForm.ticket_source === "jira" ? (
+                {(taskForm.ticket_source === "jira" || taskForm.ticket_source === "itsd") ? (
                 <label>
                   JIRA Project Key
                   <select

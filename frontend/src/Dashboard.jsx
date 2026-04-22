@@ -499,7 +499,7 @@ export default function Dashboard({ onOpenBoard, apiFetch, currentUser, onLogout
           <span>
             <strong>Integration issue:</strong>{" "}
             {Object.entries(integrationWarnings).map(([p, r]) =>
-              `${p === "jira" ? "JIRA" : p === "jira_net" ? "JIRA.net" : "ADO"} — ${r.message}`
+              `${p === "jira" ? "JIRA" : p === "jira_net" ? "JIRA.net" : p === "itsd" ? "ITSD" : "ADO"} — ${r.message}`
             ).join("; ")}
           </span>
           <button
