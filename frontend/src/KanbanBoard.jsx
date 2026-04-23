@@ -119,9 +119,17 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
   // Card detail view (double-click)
   const [viewCard, setViewCard] = useState(null);
 
+  // Status history
+  const [statusHistory, setStatusHistory] = useState([]);
+
   // AI Insights
   const [insightsPanel, setInsightsPanel] = useState(false);
   const [insightsData, setInsightsData] = useState(null);
+  const [insightsTab, setInsightsTab] = useState("overview"); // "overview" | "analysis"
+
+  // Filters
+  const [filterSearch, setFilterSearch] = useState("");
+  const [filterAssignee, setFilterAssignee] = useState("");
 
   // Confirm dialog
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -130,15 +138,20 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
   const [dragCard, setDragCard] = useState(null);
   const [dragOverCol, setDragOverCol] = useState(null);
 
-  const loadBoard = useCallback(async () => {
+  // Refresh
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const loadBoard = useCallback(async (options = {}) => {
+    const { refreshExternal = false } = options;
     setError("");
     try {
-      const res = await apiFetch(`${API_BASE}/api/kanban/${board.id}`);
+      const res = await apiFetch(`${API_BASE}/api/kanban/${board.id}?refresh_external=${refreshExternal ? "true" : "false"}`);
       if (!res.ok) throw new Error("Failed to load kanban board");
       const data = await res.json();
       setColumns(data.columns || []);
       setRows(data.rows || []);
       setCards(data.cards || []);
+      setStatusHistory(data.status_history || []);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -147,6 +160,23 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
   }, [board.id, apiFetch]);
 
   useEffect(() => { loadBoard(); }, [loadBoard]);
+
+  // Auto-sync external tickets every 5 minutes
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadBoard({ refreshExternal: true });
+    }, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [loadBoard]);
+
+  async function refreshBoard() {
+    setIsRefreshing(true);
+    try {
+      await loadBoard({ refreshExternal: true });
+    } finally {
+      setIsRefreshing(false);
+    }
+  }
 
   // ── AI Insights ──
   async function fetchInsights() {
@@ -339,17 +369,16 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
         borderBottom: "1px solid #e5e7eb",
         flexShrink: 0,
       }}>
-        {/* Row 1: logo | board name (centered) | user controls */}
+        {/* Single row: logo | board name + filters | actions + avatar */}
         <div style={{
-          display: "grid",
-          gridTemplateColumns: "1fr auto 1fr",
+          display: "flex",
           alignItems: "center",
-          padding: "0 28px",
+          padding: "0 20px",
           height: "52px",
-          borderBottom: "1px solid #f3f4f6",
+          gap: 12,
         }}>
-          {/* Left — back nav */}
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          {/* Left — back nav + board name */}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }}>
             <button
               onClick={onBack}
               style={{
@@ -370,17 +399,75 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
               <span style={{ color: "#111827" }}>Task</span>
               <span style={{ color: "#1d4ed8" }}>Weave</span>
             </button>
-          </div>
-
-          {/* Center — board name */}
-          <div style={{ textAlign: "center" }}>
-            <span style={{ fontSize: "15px", fontWeight: "600", color: "#111827" }}>
+            <div style={{ borderLeft: "1px solid #e5e7eb", height: 20, margin: "0 4px" }} />
+            <span style={{ fontSize: "14px", fontWeight: "600", color: "#111827", whiteSpace: "nowrap" }}>
               {board.name}
             </span>
           </div>
 
-          {/* Right — add column + avatar dropdown */}
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", justifyContent: "flex-end" }}>
+          {/* Center — search + assignee filter */}
+          {columns.length > 0 && (() => {
+            const assignees = [...new Set(cards.map((c) => c.assignee).filter(Boolean))].sort();
+            const isFiltered = filterSearch || filterAssignee;
+            return (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, justifyContent: "center", minWidth: 0 }}>
+                <div style={{ position: "relative", flex: "0 1 200px", minWidth: 120 }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                    style={{ position: "absolute", left: 7, top: "50%", transform: "translateY(-50%)" }}>
+                    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                  </svg>
+                  <input
+                    value={filterSearch}
+                    onChange={(e) => setFilterSearch(e.target.value)}
+                    placeholder="Search cards..."
+                    style={{
+                      width: "100%", padding: "4px 8px 4px 26px", fontSize: 12, border: "1px solid #e5e7eb",
+                      borderRadius: 6, outline: "none", background: "#f9fafb",
+                    }}
+                  />
+                </div>
+                {assignees.length > 0 && (
+                  <select
+                    value={filterAssignee}
+                    onChange={(e) => setFilterAssignee(e.target.value)}
+                    style={{
+                      padding: "4px 8px", fontSize: 12, border: "1px solid #e5e7eb",
+                      borderRadius: 6, background: "#f9fafb", color: filterAssignee ? "#111827" : "#9ca3af",
+                      cursor: "pointer", outline: "none",
+                    }}
+                  >
+                    <option value="">All assignees</option>
+                    {assignees.map((a) => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                )}
+                {isFiltered && (
+                  <button
+                    onClick={() => { setFilterSearch(""); setFilterAssignee(""); }}
+                    style={{
+                      background: "none", border: "none", cursor: "pointer",
+                      fontSize: 11, color: "#6b7280", padding: "3px 6px", borderRadius: 4,
+                    }}
+                    title="Clear filters"
+                  >✕</button>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Right — action buttons + avatar */}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }}>
+            <button
+              onClick={refreshBoard}
+              disabled={isRefreshing}
+              style={{
+                background: "none", border: "1px solid #e5e7eb", borderRadius: 6,
+                padding: "6px 10px", cursor: isRefreshing ? "default" : "pointer", fontSize: 13, color: "#6b7280",
+                display: "flex", alignItems: "center", gap: 4, opacity: isRefreshing ? 0.5 : 1,
+              }}
+              title="Refresh external tickets"
+            >
+              <span style={{ display: "inline-block", animation: isRefreshing ? "spin 1s linear infinite" : "none" }}>↻</span>
+            </button>
             <button onClick={() => { setShowAddCol(true); setNewColColor(DEFAULT_COL_COLORS[columns.length % DEFAULT_COL_COLORS.length]); }}
               style={{
                 background: "#1d4ed8", color: "#fff", border: "none", borderRadius: 6,
@@ -395,10 +482,10 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                 borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700,
                 display: "flex", alignItems: "center", gap: 5,
               }}
-              title={insightsPanel ? "Close AI panel" : "Agile Board Insights"}
+              title={insightsPanel ? "Close panel" : "Taskweave Coach"}
             >
               <span style={{ fontSize: 14 }}>&#129302;</span>
-              AI Insights
+              Taskweave Coach
             </button>
             <div style={{ borderLeft: "1px solid #e5e7eb", height: 24, margin: "0 4px" }} />
             {onManageUsers && pendingCount > 0 && (
@@ -504,15 +591,6 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
           </div>
         </div>
 
-        {/* Row 2: board type label (left) */}
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-          padding: "0 28px", height: "40px",
-        }}>
-          <span style={{ fontSize: "13px", color: "#9ca3af", fontStyle: "italic" }}>
-            Kanban Board
-          </span>
-        </div>
       </div>
 
       {error && (
@@ -551,7 +629,12 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
           overflow: "hidden",
         }}>
           {columns.map((col, colIdx) => {
-            const colCards = cards.filter((c) => c.column_id === col.id);
+            const colCards = cards.filter((c) => {
+              if (c.column_id !== col.id) return false;
+              if (filterSearch && !(c.title || "").toLowerCase().includes(filterSearch.toLowerCase()) && !(c.issue_key || "").toLowerCase().includes(filterSearch.toLowerCase())) return false;
+              if (filterAssignee && c.assignee !== filterAssignee) return false;
+              return true;
+            });
             const isOver = dragOverCol === col.id;
             return (
               <div
@@ -670,7 +753,7 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
 
                       {/* Title */}
                       <div style={{ padding: "2px 10px 6px", fontWeight: 600, color: "#111827", lineHeight: 1.4, wordBreak: "break-word", cursor: "pointer" }}
-                        onClick={() => setEditCard({ ...card })}
+                        onClick={() => setViewCard(card)}
                       >
                         {card.title}
                       </div>
@@ -752,7 +835,8 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ fontSize: 16 }}>&#129302;</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Agile Board Advisor</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Taskweave Coach</span>
+                <span style={{ fontSize: 10, color: "#9ca3af", fontWeight: 500, marginLeft: 4 }}>Agile Delivery Insights</span>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <button type="button" onClick={fetchInsights}
@@ -780,105 +864,208 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                 const healthIcon = d.board_health === "green" ? "🟢" : d.board_health === "amber" ? "🟡" : d.board_health === "red" ? "🔴" : "⚪";
                 return (
                 <div style={{ fontSize: 12, color: "#374151", lineHeight: 1.6 }}>
-                  {/* Board info bar */}
-                  <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: "6px 10px", background: "#f9fafb", borderRadius: 6 }}>
-                    <strong style={{ color: "#111827" }}>{d.board_name}</strong> · {d.total_cards} cards
+                  {/* Tab switcher */}
+                  <div style={{ display: "flex", gap: 0, marginBottom: 14, background: "#f3f4f6", borderRadius: 8, padding: 3 }}>
+                    {[["overview", "Overview"], ["analysis", "Analysis"], ["actions", "Actions"]].map(([key, label]) => (
+                      <button key={key} onClick={() => setInsightsTab(key)} style={{
+                        flex: 1, padding: "6px 0", fontSize: 11, fontWeight: 700, border: "none", cursor: "pointer",
+                        borderRadius: 6, transition: "all 0.15s",
+                        background: insightsTab === key ? "#fff" : "transparent",
+                        color: insightsTab === key ? "#111827" : "#9ca3af",
+                        boxShadow: insightsTab === key ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                      }}>{label}</button>
+                    ))}
                   </div>
 
-                  {/* Agile Score + Health */}
-                  <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-                    <div style={{
-                      flex: 1, background: healthBg, borderRadius: 8, padding: "10px 12px",
-                      borderLeft: `3px solid ${healthColor}`,
-                    }}>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: healthColor, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-                        {healthIcon} Board Health
+                  {/* ── OVERVIEW TAB ── */}
+                  {insightsTab === "overview" && (
+                    <>
+                      {/* Board info bar */}
+                      <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: "6px 10px", background: "#f9fafb", borderRadius: 6 }}>
+                        <strong style={{ color: "#111827" }}>{d.board_name}</strong> · {d.total_cards} cards
                       </div>
-                      <div style={{ fontSize: 12, lineHeight: 1.5 }}>{d.health_summary}</div>
-                    </div>
-                  </div>
 
-                  {d.agile_score != null && (
-                    <div style={{
-                      display: "flex", alignItems: "center", gap: 10, marginBottom: 14,
-                      padding: "10px 12px", background: "#f9fafb", borderRadius: 8,
-                    }}>
-                      <div style={{
-                        width: 44, height: 44, borderRadius: "50%",
-                        background: d.agile_score >= 7 ? "#dcfce7" : d.agile_score >= 4 ? "#fef3c7" : "#fef2f2",
-                        border: `3px solid ${d.agile_score >= 7 ? "#15803d" : d.agile_score >= 4 ? "#d97706" : "#dc2626"}`,
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                        fontSize: 16, fontWeight: 800,
-                        color: d.agile_score >= 7 ? "#15803d" : d.agile_score >= 4 ? "#d97706" : "#dc2626",
-                      }}>{d.agile_score}</div>
-                      <div>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.06em" }}>Agile Score</div>
-                        <div style={{ fontSize: 11, color: "#6b7280" }}>
-                          {d.agile_score >= 8 ? "Excellent" : d.agile_score >= 6 ? "Good" : d.agile_score >= 4 ? "Needs Improvement" : "Critical"} / 10
+                      {/* Health + Score side by side */}
+                      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+                        <div style={{
+                          flex: 1, background: healthBg, borderRadius: 8, padding: "10px 12px",
+                          borderLeft: `3px solid ${healthColor}`,
+                        }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: healthColor, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                            {healthIcon} Board Health
+                          </div>
+                          <div style={{ fontSize: 12, lineHeight: 1.5 }}>{d.health_summary}</div>
                         </div>
+                        {d.agile_score != null && (
+                          <div style={{
+                            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                            padding: "10px 14px", background: "#f9fafb", borderRadius: 8, minWidth: 70,
+                          }}>
+                            <div style={{
+                              width: 40, height: 40, borderRadius: "50%",
+                              background: d.agile_score >= 7 ? "#dcfce7" : d.agile_score >= 4 ? "#fef3c7" : "#fef2f2",
+                              border: `3px solid ${d.agile_score >= 7 ? "#15803d" : d.agile_score >= 4 ? "#d97706" : "#dc2626"}`,
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              fontSize: 15, fontWeight: 800,
+                              color: d.agile_score >= 7 ? "#15803d" : d.agile_score >= 4 ? "#d97706" : "#dc2626",
+                            }}>{d.agile_score}</div>
+                            <div style={{ fontSize: 9, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", marginTop: 4 }}>Score</div>
+                          </div>
+                        )}
                       </div>
-                    </div>
+
+                      {/* Delivery Metrics */}
+                      {d.delivery_metrics && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#111827", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                            📊 Delivery Metrics
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
+                            <div style={{ background: "#f0fdf4", borderRadius: 6, padding: "8px 10px", textAlign: "center" }}>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: "#15803d" }}>
+                                {d.delivery_metrics.avg_cycle_time_days != null ? `${d.delivery_metrics.avg_cycle_time_days}d` : "—"}
+                              </div>
+                              <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em" }}>Avg Cycle</div>
+                            </div>
+                            <div style={{ background: "#eff6ff", borderRadius: 6, padding: "8px 10px", textAlign: "center" }}>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: "#1d4ed8" }}>
+                                {d.delivery_metrics.avg_lead_time_days != null ? `${d.delivery_metrics.avg_lead_time_days}d` : "—"}
+                              </div>
+                              <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em" }}>Avg Lead</div>
+                            </div>
+                            <div style={{ background: d.delivery_metrics.cards_aging_over_3d > 0 ? "#fef2f2" : "#f9fafb", borderRadius: 6, padding: "8px 10px", textAlign: "center" }}>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: d.delivery_metrics.cards_aging_over_3d > 0 ? "#dc2626" : "#6b7280" }}>
+                                {d.delivery_metrics.cards_aging_over_3d ?? 0}
+                              </div>
+                              <div style={{ fontSize: 9, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em" }}>Aging &gt;3d</div>
+                            </div>
+                          </div>
+                          {d.delivery_metrics.longest_aging_card && (
+                            <div style={{ fontSize: 11, color: "#dc2626", background: "#fef2f2", borderRadius: 4, padding: "4px 8px" }}>
+                              🐌 Longest aging: <strong>{d.delivery_metrics.longest_aging_card}</strong>
+                            </div>
+                          )}
+                          {d.delivery_metrics.summary && (
+                            <div style={{ fontSize: 12, color: "#374151", marginTop: 6, lineHeight: 1.5 }}>{d.delivery_metrics.summary}</div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Column Distribution */}
+                      {d.column_distribution && (
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#111827", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Column Distribution</div>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            {Object.entries(d.column_distribution).map(([col, count]) => (
+                              <span key={col} style={{
+                                fontSize: 11, padding: "3px 8px", borderRadius: 4,
+                                background: "#f3f4f6", color: "#374151", fontWeight: 600,
+                              }}>{col}: {count}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
                   )}
 
-                  {/* WIP Analysis */}
-                  {d.wip_analysis && (
-                    <div style={{ marginBottom: 14 }}>
-                      <div style={{ fontWeight: 700, fontSize: 10, color: "#111827", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>WIP Analysis</div>
-                      <div style={{ background: "#eff6ff", borderRadius: 6, padding: "8px 10px", fontSize: 12, borderLeft: "3px solid #3b82f6", lineHeight: 1.5 }}>
-                        {d.wip_analysis}
-                      </div>
-                    </div>
+                  {/* ── ANALYSIS TAB ── */}
+                  {insightsTab === "analysis" && (
+                    <>
+                      {/* WIP Analysis */}
+                      {d.wip_analysis && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#111827", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>WIP Analysis</div>
+                          <div style={{ background: "#eff6ff", borderRadius: 6, padding: "8px 10px", fontSize: 12, borderLeft: "3px solid #3b82f6", lineHeight: 1.5 }}>
+                            {d.wip_analysis}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Blockers */}
+                      {d.blockers?.length > 0 && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#dc2626", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>🚫 Blockers</div>
+                          <div style={{ background: "#fef2f2", borderRadius: 6, borderLeft: "3px solid #dc2626", padding: "8px 10px" }}>
+                            <ul style={{ margin: 0, paddingLeft: 14 }}>
+                              {d.blockers.map((b, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5, color: "#991b1b" }}>{b}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* At Risk */}
+                      {d.blocker_risk_cards?.length > 0 && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#d97706", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>⚠ At Risk</div>
+                          <div style={{ background: "#fffbeb", borderRadius: 6, borderLeft: "3px solid #d97706", padding: "8px 10px" }}>
+                            <ul style={{ margin: 0, paddingLeft: 14 }}>
+                              {d.blocker_risk_cards.map((b, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5, color: "#92400e" }}>{b}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Bottlenecks */}
+                      {d.bottlenecks?.length > 0 && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#d97706", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>⚠ Bottlenecks</div>
+                          <div style={{ background: "#fffbeb", borderRadius: 6, borderLeft: "3px solid #d97706", padding: "8px 10px" }}>
+                            <ul style={{ margin: 0, paddingLeft: 14 }}>
+                              {d.bottlenecks.map((b, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5, color: "#92400e" }}>{b}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Empty state */}
+                      {!d.wip_analysis && !d.blockers?.length && !d.blocker_risk_cards?.length && !d.bottlenecks?.length && (
+                        <div style={{ textAlign: "center", padding: "30px 0", color: "#9ca3af", fontSize: 12 }}>
+                          ✅ No issues detected. Board is flowing well.
+                        </div>
+                      )}
+                    </>
                   )}
 
-                  {/* Column Distribution */}
-                  {d.column_distribution && (
-                    <div style={{ marginBottom: 14 }}>
-                      <div style={{ fontWeight: 700, fontSize: 10, color: "#111827", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Column Distribution</div>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {Object.entries(d.column_distribution).map(([col, count]) => (
-                          <span key={col} style={{
-                            fontSize: 11, padding: "3px 8px", borderRadius: 4,
-                            background:  "#f3f4f6", color: "#374151", fontWeight: 600,
-                          }}>{col}: {count}</span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                  {/* ── ACTIONS TAB ── */}
+                  {insightsTab === "actions" && (
+                    <>
+                      {/* Risks */}
+                      {d.risks?.length > 0 && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#dc2626", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>🚩 Risks</div>
+                          <div style={{ background: "#fef2f2", borderRadius: 6, borderLeft: "3px solid #dc2626", padding: "8px 10px" }}>
+                            <ul style={{ margin: 0, paddingLeft: 14 }}>
+                              {d.risks.map((r, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5, color: "#991b1b" }}>{r}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
 
-                  {/* Bottlenecks */}
-                  {d.bottlenecks?.length > 0 && (
-                    <div style={{ marginBottom: 14 }}>
-                      <div style={{ fontWeight: 700, fontSize: 10, color: "#d97706", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>⚠ Bottlenecks</div>
-                      <ul style={{ margin: 0, paddingLeft: 14 }}>
-                        {d.bottlenecks.map((b, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{b}</li>)}
-                      </ul>
-                    </div>
-                  )}
+                      {/* Recommendations */}
+                      {d.recommendations?.length > 0 && (
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#15803d", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>💡 Recommendations</div>
+                          <div style={{ background: "#f0fdf4", borderRadius: 6, borderLeft: "3px solid #15803d", padding: "8px 10px" }}>
+                            <ul style={{ margin: 0, paddingLeft: 14 }}>
+                              {d.recommendations.map((r, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5, color: "#166534" }}>{r}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
 
-                  {/* Risks */}
-                  {d.risks?.length > 0 && (
-                    <div style={{ marginBottom: 14 }}>
-                      <div style={{ fontWeight: 700, fontSize: 10, color: "#dc2626", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>Risks</div>
-                      <ul style={{ margin: 0, paddingLeft: 14 }}>
-                        {d.risks.map((r, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{r}</li>)}
-                      </ul>
-                    </div>
-                  )}
-
-                  {/* Recommendations */}
-                  {d.recommendations?.length > 0 && (
-                    <div>
-                      <div style={{ fontWeight: 700, fontSize: 10, color: "#15803d", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>Recommendations</div>
-                      <ul style={{ margin: 0, paddingLeft: 14 }}>
-                        {d.recommendations.map((r, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{r}</li>)}
-                      </ul>
-                    </div>
+                      {/* Empty state */}
+                      {!d.risks?.length && !d.recommendations?.length && (
+                        <div style={{ textAlign: "center", padding: "30px 0", color: "#9ca3af", fontSize: 12 }}>
+                          ✅ No actions needed right now.
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
                 );
               })() : (
                 <div style={{ textAlign: "center", padding: "40px 0", color: "#9ca3af", fontSize: 12 }}>
-                  Click <strong>AI Insights</strong> to analyze your board's agile health.
+                  Click <strong>Taskweave Coach</strong> to analyze your board's agile health.
                 </div>
               )}
             </div>
@@ -1340,6 +1527,90 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
                 </div>
               )}
             </div>
+
+            {/* Activity — merged metrics + timeline */}
+            {(() => {
+              const cardHistory = statusHistory.filter((h) => h.card_id === card.id);
+              if (cardHistory.length === 0) return null;
+              const createdAt = new Date(cardHistory[0].changed_at);
+              const lastChange = new Date(cardHistory[cardHistory.length - 1].changed_at);
+              const now = new Date();
+              const ageDays = Math.round((now - createdAt) / 86400000);
+              const inColDays = Math.round((now - lastChange) / 86400000);
+              const moves = cardHistory.filter((h) => h.from_column_id !== null).length;
+              const ageColor = ageDays > 5 ? "#dc2626" : ageDays > 3 ? "#d97706" : "#15803d";
+              const colColor = inColDays > 3 ? "#dc2626" : inColDays > 2 ? "#d97706" : "#15803d";
+              return (
+                <div style={{ padding: "0 24px 16px" }}>
+                  <button
+                    onClick={() => setViewCard((prev) => ({ ...prev, _historyOpen: !prev._historyOpen }))}
+                    style={{
+                      width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+                      background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8,
+                      padding: "8px 12px", cursor: "pointer", transition: "background 0.15s",
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.background = "#f3f4f6"}
+                    onMouseLeave={(e) => e.currentTarget.style.background = "#f9fafb"}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+                      </svg>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "#374151", textTransform: "uppercase", letterSpacing: 0.3 }}>
+                        Activity
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: ageColor }}>{ageDays}d<span style={{ fontWeight: 500, color: "#9ca3af", marginLeft: 2 }}>age</span></span>
+                      <span style={{ color: "#e5e7eb" }}>·</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: colColor }}>{inColDays}d<span style={{ fontWeight: 500, color: "#9ca3af", marginLeft: 2 }}>in col</span></span>
+                      <span style={{ color: "#e5e7eb" }}>·</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "#374151" }}>{moves}<span style={{ fontWeight: 500, color: "#9ca3af", marginLeft: 2 }}>{moves === 1 ? "move" : "moves"}</span></span>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                        style={{ transform: card._historyOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s", marginLeft: 2 }}>
+                        <polyline points="6 9 12 15 18 9"/>
+                      </svg>
+                    </div>
+                  </button>
+                  {card._historyOpen && (
+                    <div style={{ position: "relative", paddingLeft: 18, marginTop: 12 }}>
+                      <div style={{ position: "absolute", left: 5, top: 4, bottom: 4, width: 2, background: "#e5e7eb", borderRadius: 1 }} />
+                      {cardHistory.map((h, i) => {
+                        const fromCol = columns.find((c) => c.id === h.from_column_id);
+                        const toCol = columns.find((c) => c.id === h.to_column_id);
+                        const ts = new Date(h.changed_at);
+                        const timeStr = ts.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + ts.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+                        return (
+                          <div key={h.id || i} style={{ position: "relative", marginBottom: i < cardHistory.length - 1 ? 12 : 0, paddingLeft: 12 }}>
+                            <div style={{
+                              position: "absolute", left: -14, top: 4,
+                              width: 10, height: 10, borderRadius: "50%",
+                              background: toCol?.color || "#3b82f6",
+                              border: "2px solid #fff", boxShadow: "0 0 0 2px " + (toCol?.color || "#3b82f6"),
+                            }} />
+                            <div style={{ fontSize: 12, color: "#374151", lineHeight: 1.5 }}>
+                              {fromCol ? (
+                                <span>
+                                  <span style={{ color: "#9ca3af" }}>{fromCol.name}</span>
+                                  <span style={{ margin: "0 5px", color: "#d1d5db" }}>&rarr;</span>
+                                  <span style={{ fontWeight: 600, color: toCol?.color || "#374151" }}>{toCol?.name || "?"}</span>
+                                </span>
+                              ) : (
+                                <span>
+                                  <span style={{ color: "#9ca3af" }}>Created in</span>{" "}
+                                  <span style={{ fontWeight: 600, color: toCol?.color || "#374151" }}>{toCol?.name || "?"}</span>
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 1 }}>{timeStr}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Footer actions */}
             <div style={{ padding: "12px 24px 20px", borderTop: "1px solid #f3f4f6", display: "flex", justifyContent: "flex-end", gap: 8 }}>

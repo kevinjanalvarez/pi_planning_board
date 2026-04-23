@@ -296,6 +296,23 @@ def init_db() -> None:
                 except Exception:
                     pass  # column may already exist from concurrent worker
 
+        # ── Kanban card status history ──
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS kanban_card_status_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                card_id INTEGER NOT NULL,
+                board_id INTEGER NOT NULL,
+                from_column_id INTEGER,
+                to_column_id INTEGER NOT NULL,
+                changed_at TEXT NOT NULL,
+                FOREIGN KEY (card_id) REFERENCES kanban_cards(id) ON DELETE CASCADE,
+                FOREIGN KEY (from_column_id) REFERENCES kanban_columns(id),
+                FOREIGN KEY (to_column_id) REFERENCES kanban_columns(id)
+            )
+            """
+        )
+
 
 # ── User / Auth helpers ─────────────────────────────────────────────────
 
@@ -998,7 +1015,12 @@ def insert_kanban_card(board_id: int, column_id: int, row_id: int | None, title:
             "INSERT INTO kanban_cards (board_id, column_id, row_id, title, color, issue_key, ticket_source, description, assignee, external_status, external_url, external_title, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (board_id, column_id, row_id, title, color, issue_key, ticket_source, description, assignee, external_status, external_url, external_title, max_pos + 1, now, now),
         )
-        return conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (cur.lastrowid,)).fetchone()
+        card_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO kanban_card_status_history (card_id, board_id, from_column_id, to_column_id, changed_at) VALUES (?, ?, NULL, ?, ?)",
+            (card_id, board_id, column_id, now),
+        )
+        return conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (card_id,)).fetchone()
 
 
 def update_kanban_card(card_id: int, title: str | None = None, column_id: int | None = None, row_id: int | None = None, color: str | None = None) -> dict[str, Any] | None:
@@ -1007,11 +1029,18 @@ def update_kanban_card(card_id: int, title: str | None = None, column_id: int | 
         card = conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (card_id,)).fetchone()
         if not card:
             return None
+        new_column_id = column_id if column_id is not None else card["column_id"]
+        # Log status history when column changes
+        if column_id is not None and column_id != card["column_id"]:
+            conn.execute(
+                "INSERT INTO kanban_card_status_history (card_id, board_id, from_column_id, to_column_id, changed_at) VALUES (?, ?, ?, ?, ?)",
+                (card_id, card["board_id"], card["column_id"], column_id, now),
+            )
         conn.execute(
             "UPDATE kanban_cards SET title = ?, column_id = ?, row_id = ?, color = ?, updated_at = ? WHERE id = ?",
             (
                 title if title is not None else card["title"],
-                column_id if column_id is not None else card["column_id"],
+                new_column_id,
                 row_id if row_id is not None else card["row_id"],
                 color if color is not None else card["color"],
                 now,
@@ -1021,9 +1050,53 @@ def update_kanban_card(card_id: int, title: str | None = None, column_id: int | 
         return conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (card_id,)).fetchone()
 
 
+def update_kanban_card_external(card_id: int, assignee: str | None = None, external_status: str | None = None, description: str | None = None, column_id: int | None = None) -> dict[str, Any] | None:
+    """Update external fields on a kanban card (from sync). Optionally move to a new column."""
+    now = datetime.utcnow().isoformat()
+    with get_conn() as conn:
+        card = conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (card_id,)).fetchone()
+        if not card:
+            return None
+        new_column_id = column_id if column_id is not None else card["column_id"]
+        if column_id is not None and column_id != card["column_id"]:
+            conn.execute(
+                "INSERT INTO kanban_card_status_history (card_id, board_id, from_column_id, to_column_id, changed_at) VALUES (?, ?, ?, ?, ?)",
+                (card_id, card["board_id"], card["column_id"], column_id, now),
+            )
+        conn.execute(
+            "UPDATE kanban_cards SET assignee = ?, external_status = ?, description = ?, column_id = ?, updated_at = ? WHERE id = ?",
+            (
+                assignee if assignee is not None else card["assignee"],
+                external_status if external_status is not None else card["external_status"],
+                description if description is not None else card["description"],
+                new_column_id,
+                now,
+                card_id,
+            ),
+        )
+        return conn.execute("SELECT * FROM kanban_cards WHERE id = ?", (card_id,)).fetchone()
+
+
 def delete_kanban_card(card_id: int) -> bool:
     with get_conn() as conn:
+        conn.execute("DELETE FROM kanban_card_status_history WHERE card_id = ?", (card_id,))
         return conn.execute("DELETE FROM kanban_cards WHERE id = ?", (card_id,)).rowcount > 0
+
+
+def fetch_kanban_card_status_history(card_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM kanban_card_status_history WHERE card_id = ? ORDER BY changed_at",
+            (card_id,),
+        ).fetchall()
+
+
+def fetch_kanban_board_status_history(board_id: int) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM kanban_card_status_history WHERE board_id = ? ORDER BY changed_at",
+            (board_id,),
+        ).fetchall()
 
 
 # ── Credentials management ──────────────────────────────────────────────

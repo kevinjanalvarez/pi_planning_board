@@ -477,6 +477,7 @@ export default function App() {
   const [avatarMenuOpen, setAvatarMenuOpen] = useState(false);
   const [insightsPanel, setInsightsPanel] = useState(false);       // true/false toggle
   const [insightsData, setInsightsData] = useState(null);          // { type, data, loading, error }
+  const [insightsTab, setInsightsTab] = useState("overview");      // overview | analysis | actions
   const boardWrapRef = useRef(null);
   const ganttRef = useRef(null);
   const resizeStateRef = useRef(null);
@@ -2057,10 +2058,10 @@ export default function App() {
                 border: insightsPanel ? "1px solid #bfdbfe" : "1px solid #e5e7eb",
                 borderRadius: 6, cursor: "pointer",
               }}
-              title={insightsPanel ? "Close AI panel" : "Open AI Insights"}
+              title={insightsPanel ? "Close panel" : "Taskweave Coach"}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a4 4 0 0 0-4 4c0 2.8 4 7 4 7s4-4.2 4-7a4 4 0 0 0-4-4z"/><circle cx="12" cy="6" r="1.5"/><path d="M5 20h14"/><path d="M5 17h14"/></svg>
-              AI Insights
+              Taskweave Coach
             </button>
             <div style={{ position: "relative", display: "inline-block" }}>
               <button
@@ -2864,7 +2865,8 @@ export default function App() {
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ fontSize: 16 }}>&#129302;</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Taskweave Coach</span>
+                <span style={{ fontSize: 10, color: "#9ca3af", fontWeight: 500, marginLeft: 4 }}>
                   {insightsData?.type === "board" ? "PI Health" : "Milestone Insights"}
                 </span>
               </div>
@@ -2901,70 +2903,153 @@ export default function App() {
                 <div style={{ color: "#dc2626", fontSize: 12, padding: "16px 0" }}>
                   {insightsData.error}
                 </div>
-              ) : insightsData?.data ? (
+              ) : insightsData?.data ? (() => {
+                const d = insightsData.data;
+                const healthColor = d.board_health === "green" ? "#15803d" : d.board_health === "amber" ? "#d97706" : d.board_health === "red" ? "#dc2626" : "#6b7280";
+                const healthBg = d.board_health === "green" ? "#f0fdf4" : d.board_health === "amber" ? "#fffbeb" : d.board_health === "red" ? "#fef2f2" : "#f9fafb";
+                const healthIcon = d.board_health === "green" ? "🟢" : d.board_health === "amber" ? "🟡" : d.board_health === "red" ? "🔴" : "⚪";
+                return (
                 <div style={{ fontSize: 12, color: "#374151", lineHeight: 1.6 }}>
-                  {insightsData.data.milestone_key ? (
-                    <div style={{
-                      fontSize: 11, color: "#6b7280", marginBottom: 10,
-                      padding: "6px 10px", background: "#f9fafb", borderRadius: 6,
-                    }}>
-                      <strong style={{ color: "#111827" }}>{insightsData.data.milestone_key}</strong> · {insightsData.data.milestone_title}
-                      {insightsData.data.progress ? (
-                        <span style={{ display: "block", marginTop: 3 }}>
-                          {insightsData.data.progress.pct}% done ({insightsData.data.progress.done}/{insightsData.data.progress.total}), {insightsData.data.progress.blocked} blocked
-                        </span>
+                  {/* Tab switcher */}
+                  <div style={{ display: "flex", gap: 0, marginBottom: 14, background: "#f3f4f6", borderRadius: 8, padding: 3 }}>
+                    {[["overview", "Overview"], ["analysis", "Analysis"], ["actions", "Actions"]].map(([key, label]) => (
+                      <button key={key} onClick={() => setInsightsTab(key)} style={{
+                        flex: 1, padding: "6px 0", fontSize: 11, fontWeight: 700, border: "none", cursor: "pointer",
+                        borderRadius: 6, transition: "all 0.15s",
+                        background: insightsTab === key ? "#fff" : "transparent",
+                        color: insightsTab === key ? "#111827" : "#9ca3af",
+                        boxShadow: insightsTab === key ? "0 1px 3px rgba(0,0,0,0.1)" : "none",
+                      }}>{label}</button>
+                    ))}
+                  </div>
+
+                  {/* ── OVERVIEW TAB ── */}
+                  {insightsTab === "overview" && (
+                    <>
+                      {/* Context bar */}
+                      {d.milestone_key ? (
+                        <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: "6px 10px", background: "#f9fafb", borderRadius: 6 }}>
+                          <strong style={{ color: "#111827" }}>{d.milestone_key}</strong> · {d.milestone_title}
+                          {d.progress ? (
+                            <span style={{ display: "block", marginTop: 3 }}>
+                              {d.progress.pct}% done ({d.progress.done}/{d.progress.total}), {d.progress.blocked} blocked
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : d.board_name ? (
+                        <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 10, padding: "6px 10px", background: "#f9fafb", borderRadius: 6 }}>
+                          <strong style={{ color: "#111827" }}>{d.board_name}</strong> · {d.milestone_count} milestone(s)
+                        </div>
                       ) : null}
-                    </div>
-                  ) : null}
-                  {insightsData.data.board_name ? (
-                    <div style={{
-                      fontSize: 11, color: "#6b7280", marginBottom: 10,
-                      padding: "6px 10px", background: "#f9fafb", borderRadius: 6,
-                    }}>
-                      <strong style={{ color: "#111827" }}>{insightsData.data.board_name}</strong> · {insightsData.data.milestone_count} milestone(s)
-                    </div>
-                  ) : null}
 
-                  <div style={{ marginBottom: 14 }}>
-                    <div style={{
-                      fontWeight: 700, fontSize: 10, color: "#111827", marginBottom: 4,
-                      textTransform: "uppercase", letterSpacing: "0.06em",
-                    }}>Health Summary</div>
-                    <div style={{
-                      background: "#f0fdf4", borderRadius: 6, padding: "8px 10px",
-                      fontSize: 12, borderLeft: "3px solid #15803d", lineHeight: 1.5,
-                    }}>
-                      {insightsData.data.health_summary}
-                    </div>
-                  </div>
+                      {/* Health + Score side by side */}
+                      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+                        <div style={{
+                          flex: 1, background: healthBg, borderRadius: 8, padding: "10px 12px",
+                          borderLeft: `3px solid ${healthColor}`,
+                        }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: healthColor, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+                            {healthIcon} Board Health
+                          </div>
+                          <div style={{ fontSize: 12, lineHeight: 1.5 }}>{d.health_summary}</div>
+                        </div>
+                        {d.agile_score != null && (
+                          <div style={{
+                            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                            padding: "10px 14px", background: "#f9fafb", borderRadius: 8, minWidth: 70,
+                          }}>
+                            <div style={{
+                              width: 40, height: 40, borderRadius: "50%",
+                              background: d.agile_score >= 7 ? "#dcfce7" : d.agile_score >= 4 ? "#fef3c7" : "#fef2f2",
+                              border: `3px solid ${d.agile_score >= 7 ? "#15803d" : d.agile_score >= 4 ? "#d97706" : "#dc2626"}`,
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              fontSize: 15, fontWeight: 800,
+                              color: d.agile_score >= 7 ? "#15803d" : d.agile_score >= 4 ? "#d97706" : "#dc2626",
+                            }}>{d.agile_score}</div>
+                            <div style={{ fontSize: 9, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", marginTop: 4 }}>Score</div>
+                          </div>
+                        )}
+                      </div>
 
-                  <div style={{ marginBottom: 14 }}>
-                    <div style={{
-                      fontWeight: 700, fontSize: 10, color: "#dc2626", marginBottom: 4,
-                      textTransform: "uppercase", letterSpacing: "0.06em",
-                    }}>Risks</div>
-                    <ul style={{ margin: 0, paddingLeft: 14 }}>
-                      {(insightsData.data.risks || []).map((r, i) => (
-                        <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{r}</li>
-                      ))}
-                    </ul>
-                  </div>
+                    </>
+                  )}
 
-                  <div>
-                    <div style={{
-                      fontWeight: 700, fontSize: 10, color: "#15803d", marginBottom: 4,
-                      textTransform: "uppercase", letterSpacing: "0.06em",
-                    }}>Recommendations</div>
-                    <ul style={{ margin: 0, paddingLeft: 14 }}>
-                      {(insightsData.data.recommendations || []).map((r, i) => (
-                        <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5 }}>{r}</li>
-                      ))}
-                    </ul>
-                  </div>
+                  {/* ── ANALYSIS TAB ── */}
+                  {insightsTab === "analysis" && (
+                    <>
+                      {/* Blockers */}
+                      {d.blockers?.length > 0 && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#dc2626", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>🚫 Blockers</div>
+                          <div style={{ background: "#fef2f2", borderRadius: 6, borderLeft: "3px solid #dc2626", padding: "8px 10px" }}>
+                            <ul style={{ margin: 0, paddingLeft: 14 }}>
+                              {d.blockers.map((b, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5, color: "#991b1b" }}>{b}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Bottlenecks */}
+                      {d.bottlenecks?.length > 0 && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#d97706", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>⚠ Bottlenecks</div>
+                          <div style={{ background: "#fffbeb", borderRadius: 6, borderLeft: "3px solid #d97706", padding: "8px 10px" }}>
+                            <ul style={{ margin: 0, paddingLeft: 14 }}>
+                              {d.bottlenecks.map((b, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5, color: "#92400e" }}>{b}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Empty state */}
+                      {!d.blockers?.length && !d.bottlenecks?.length && (
+                        <div style={{ textAlign: "center", padding: "30px 0", color: "#9ca3af", fontSize: 12 }}>
+                          ✅ No issues detected. PI is flowing well.
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {/* ── ACTIONS TAB ── */}
+                  {insightsTab === "actions" && (
+                    <>
+                      {/* Risks */}
+                      {d.risks?.length > 0 && (
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#dc2626", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>🚩 Risks</div>
+                          <div style={{ background: "#fef2f2", borderRadius: 6, borderLeft: "3px solid #dc2626", padding: "8px 10px" }}>
+                            <ul style={{ margin: 0, paddingLeft: 14 }}>
+                              {d.risks.map((r, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5, color: "#991b1b" }}>{r}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Recommendations */}
+                      {d.recommendations?.length > 0 && (
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 10, color: "#15803d", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>💡 Recommendations</div>
+                          <div style={{ background: "#f0fdf4", borderRadius: 6, borderLeft: "3px solid #15803d", padding: "8px 10px" }}>
+                            <ul style={{ margin: 0, paddingLeft: 14 }}>
+                              {d.recommendations.map((r, i) => <li key={i} style={{ marginBottom: 4, fontSize: 12, lineHeight: 1.5, color: "#166534" }}>{r}</li>)}
+                            </ul>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Empty state */}
+                      {!d.risks?.length && !d.recommendations?.length && (
+                        <div style={{ textAlign: "center", padding: "30px 0", color: "#9ca3af", fontSize: 12 }}>
+                          ✅ No actions needed right now.
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
-              ) : (
+                );
+              })() : (
                 <div style={{ textAlign: "center", padding: "40px 0", color: "#9ca3af", fontSize: 12 }}>
-                  Click <strong>AI Insights</strong> in the toolbar or use 🤖 on a milestone to generate insights.
+                  Click <strong>Taskweave Coach</strong> in the toolbar or use 🤖 on a milestone to generate insights.
                 </div>
               )}
             </div>
@@ -3466,8 +3551,8 @@ export default function App() {
               {itemAction.itemType === "IDEA" ? (
                 <button
                   type="button"
-                  title="AI Insights"
-                  aria-label="Generate AI insights for this milestone"
+                  title="Taskweave Coach"
+                  aria-label="Generate Taskweave Coach insights for this milestone"
                   onClick={() => {
                     fetchMilestoneInsights(itemAction.itemId);
                     setItemAction(null);

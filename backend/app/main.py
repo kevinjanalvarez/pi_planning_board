@@ -70,7 +70,10 @@ from app.db import (
     fetch_kanban_cards,
     insert_kanban_card,
     update_kanban_card,
+    update_kanban_card_external,
     delete_kanban_card,
+    fetch_kanban_card_status_history,
+    fetch_kanban_board_status_history,
     # ── credentials ──
     init_credentials_table,
     upsert_credential,
@@ -1821,6 +1824,113 @@ def admin_delete_user_credential(user_id: int, provider: str, admin: dict = Depe
 
 # ── Kanban endpoints ────────────────────────────────────────────────────
 
+# Status-to-column tone mapping (mirrors frontend STATUS_TONE_MAP / TONE_COLUMN_ALIASES)
+_KANBAN_TONE_MAP = {
+    "in dev": "in-progress", "in development": "in-progress", "development": "in-progress",
+    "in progress": "in-progress", "in test": "in-progress", "in testing": "in-progress",
+    "testing": "in-progress", "test": "in-progress", "active": "in-progress", "ongoing": "in-progress",
+    "doing": "in-progress", "wip": "in-progress", "in review": "in-progress", "review": "in-progress",
+    "committed": "in-progress",
+    "done": "done", "resolved": "done", "closed": "done", "completed": "done", "finished": "done",
+    "cancelled": "done", "canceled": "done",
+    "blocked": "blocked", "on hold": "blocked", "impediment": "blocked",
+    "to do": "todo", "todo": "todo", "open": "todo", "new": "todo", "backlog": "todo", "not started": "todo",
+    "design": "design", "discovery": "design", "analysis": "design",
+    "ready": "ready", "ready for dev": "ready", "refined": "ready",
+    "icebox": "icebox", "refill": "icebox", "frozen": "icebox",
+}
+_KANBAN_TONE_COL_ALIASES = {
+    "in-progress": ["in progress", "inprogress", "in-progress", "wip", "doing", "active"],
+    "done":        ["done", "completed", "resolved", "closed", "finished", "cancelled", "canceled"],
+    "blocked":     ["blocked", "on hold", "impediment"],
+    "todo":        ["to do", "todo", "backlog", "open", "not started"],
+    "design":      ["design", "discovery", "analysis"],
+    "ready":       ["ready", "refined"],
+    "icebox":      ["icebox", "frozen", "parking lot"],
+}
+
+
+def _find_column_for_status(status: str, columns: list[dict]) -> dict | None:
+    """Find a matching column for an external status. Returns None if no match (no fallback)."""
+    val = (status or "").strip().lower()
+    if not val or not columns:
+        return None
+    tone = _KANBAN_TONE_MAP.get(val)
+    if not tone:
+        for keyword, t in _KANBAN_TONE_MAP.items():
+            if val in keyword or keyword in val:
+                tone = t
+                break
+    if not tone:
+        return None
+    aliases = _KANBAN_TONE_COL_ALIASES.get(tone)
+    if not aliases:
+        return None
+    for col in columns:
+        if col["name"].strip().lower() in aliases:
+            return col
+    return None
+
+
+def _sync_kanban_external_cards(cards: list[dict], columns: list[dict], user_id: int) -> list[dict]:
+    """Re-fetch external ticket data for kanban cards and update status/assignee. Auto-move if column matches."""
+    synced: list[dict] = []
+    for card in cards:
+        source = _normalize_ticket_source(card.get("ticket_source"))
+        issue_key = (card.get("issue_key") or "").strip()
+        if not issue_key or not source:
+            synced.append(card)
+            continue
+
+        issue = None
+        if _is_jira_provider(source):
+            try:
+                issue = fetch_jira_issue(issue_key, user_id, provider=source)
+            except HTTPException:
+                synced.append(card)
+                continue
+        elif source == SOURCE_ADO:
+            try:
+                issue = fetch_ado_work_item(issue_key, user_id)
+            except HTTPException:
+                synced.append(card)
+                continue
+        else:
+            synced.append(card)
+            continue
+
+        new_status = issue.get("status")
+        new_assignee = issue.get("assignee")
+        new_desc = issue.get("description")
+
+        # Determine target column: move if a matching column exists and card is not already there
+        target_col_id = None
+        if new_status:
+            matched_col = _find_column_for_status(new_status, columns)
+            if matched_col and matched_col["id"] != card["column_id"]:
+                target_col_id = matched_col["id"]
+
+        changed = any([
+            card.get("external_status") != new_status,
+            card.get("assignee") != new_assignee,
+            card.get("description") != new_desc,
+            target_col_id is not None,
+        ])
+        if not changed:
+            synced.append(card)
+            continue
+
+        updated = update_kanban_card_external(
+            card["id"],
+            assignee=new_assignee,
+            external_status=new_status,
+            description=new_desc,
+            column_id=target_col_id,
+        )
+        synced.append(updated or card)
+
+    return synced
+
 class KanbanColumnRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     color: str = "#3b82f6"
@@ -1879,17 +1989,22 @@ def kanban_ticket_lookup(key: str = Query(..., min_length=1), source: str = Quer
 
 
 @app.get("/api/kanban/{board_id}")
-def get_kanban_board(board_id: int) -> dict:
+def get_kanban_board(board_id: int, refresh_external: bool = Query(False), user: dict = Depends(get_current_user)) -> dict:
     board = fetch_board_by_id(board_id)
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
     if board.get("board_type") != "kanban":
         raise HTTPException(status_code=400, detail="Not a kanban board")
+    columns = fetch_kanban_columns(board_id)
+    cards = fetch_kanban_cards(board_id)
+    if refresh_external:
+        cards = _sync_kanban_external_cards(cards, columns, user["id"])
     return {
         "board": board,
-        "columns": fetch_kanban_columns(board_id),
+        "columns": columns,
         "rows": fetch_kanban_rows(board_id),
-        "cards": fetch_kanban_cards(board_id),
+        "cards": cards,
+        "status_history": fetch_kanban_board_status_history(board_id),
     }
 
 
@@ -1976,6 +2091,11 @@ def remove_kanban_card(card_id: int) -> dict:
     if not delete_kanban_card(card_id):
         raise HTTPException(status_code=404, detail="Card not found")
     return {"status": "deleted"}
+
+
+@app.get("/api/kanban/cards/{card_id}/status-history")
+def get_kanban_card_status_history(card_id: int) -> list[dict]:
+    return fetch_kanban_card_status_history(card_id)
 
 
 @app.get("/api/admin/users")
@@ -2529,18 +2649,24 @@ def _build_milestone_prompt(ctx: dict) -> str:
         tasks_text = "  (no linked tasks)\n"
 
     return (
-        "You are an agile delivery advisor analyzing a PI Planning milestone.\n\n"
+        "You are an agile coach at Home Credit Philippines (fintech, consumer lending). "
+        "Analyze this PI Planning milestone. Be concise: 1 sentence per item, no fluff.\n\n"
         f"Milestone: {ms.get('issue_key', 'N/A')} \"{ms.get('title', 'Untitled')}\"\n"
         f"Timeline: {ctx['ms_start']} to {ctx['ms_end']} (Today: {ctx['today']})\n"
         f"Progress: {ctx['pct']}% ({ctx['done']}/{ctx['total']} tasks done, {ctx['blocked']} blocked, {ctx['in_progress']} in progress)\n\n"
         f"Linked Tasks:\n{tasks_text}\n"
-        "Provide a concise analysis in exactly this JSON format (no markdown, no code fences):\n"
+        "Return exactly this JSON (no markdown, no code fences):\n"
         '{\n'
-        '  "health_summary": "2-3 sentence overall health assessment",\n'
-        '  "risks": ["risk 1", "risk 2", "risk 3"],\n'
-        '  "recommendations": ["recommendation 1", "recommendation 2", "recommendation 3"]\n'
+        '  "board_health": "green|amber|red",\n'
+        '  "health_summary": "1-2 sentence health assessment",\n'
+        '  "agile_score": 7,\n'
+        '  "blockers": ["blocker 1"],\n'
+        '  "bottlenecks": ["bottleneck 1"],\n'
+        '  "risks": ["risk 1"],\n'
+        '  "recommendations": ["recommendation 1"]\n'
         '}\n'
-        "Keep each item brief (1 sentence). Focus on actionable insights."
+        "Rules: agile_score 1-10. board_health: green if on track, amber if at risk, red if blocked/behind. "
+        "Keep arrays 1-4 items max. Empty array [] if none."
     )
 
 
@@ -2553,21 +2679,27 @@ def _build_board_prompt(board: dict, milestones_ctx: list[dict]) -> str:
         ms_summaries = "  (no milestones)\n"
 
     return (
-        "You are an agile delivery advisor providing a board-level PI health summary.\n\n"
+        "You are an agile coach at Home Credit Philippines (fintech, consumer lending). "
+        "Provide a board-level PI health summary. Be concise: 1 sentence per item, no fluff.\n\n"
         f"Board: \"{board.get('name', 'Untitled')}\"\n"
         f"Timeline: {board.get('start_date', 'N/A')} to {board.get('end_date', 'N/A')} (Today: {date.today().isoformat()})\n\n"
         f"Milestones:\n{ms_summaries}\n"
-        "Provide a concise board-level analysis in exactly this JSON format (no markdown, no code fences):\n"
+        "Return exactly this JSON (no markdown, no code fences):\n"
         '{\n'
-        '  "health_summary": "2-3 sentence overall PI health assessment across all milestones",\n'
-        '  "risks": ["risk 1", "risk 2", "risk 3"],\n'
-        '  "recommendations": ["recommendation 1", "recommendation 2", "recommendation 3"]\n'
+        '  "board_health": "green|amber|red",\n'
+        '  "health_summary": "1-2 sentence overall PI health across all milestones",\n'
+        '  "agile_score": 7,\n'
+        '  "blockers": ["blocker 1"],\n'
+        '  "bottlenecks": ["bottleneck 1"],\n'
+        '  "risks": ["risk 1"],\n'
+        '  "recommendations": ["recommendation 1"]\n'
         '}\n'
-        "Keep each item brief (1 sentence). Focus on cross-cutting risks and portfolio-level insights."
+        "Rules: agile_score 1-10. board_health: green if on track, amber if at risk, red if blocked/behind. "
+        "Keep arrays 1-4 items max. Empty array [] if none. Focus on cross-cutting risks and portfolio-level insights."
     )
 
 
-def _call_llm(prompt: str) -> dict:
+def _call_llm(prompt: str, max_tokens: int | None = None) -> dict:
     """Send prompt to Azure OpenAI and parse the JSON response."""
     if not _aoai_client:
         raise HTTPException(status_code=503, detail="Azure OpenAI is not configured")
@@ -2577,7 +2709,7 @@ def _call_llm(prompt: str) -> dict:
             model=_AOAI_DEPLOYMENT,
             messages=[{"role": "user", "content": prompt}],
             temperature=_AOAI_TEMPERATURE,
-            max_completion_tokens=_AOAI_MAX_TOKENS,
+            max_completion_tokens=max_tokens or _AOAI_MAX_TOKENS,
         )
         content = response.choices[0].message.content.strip()
         # Strip markdown code fences if the model wraps them anyway
@@ -2645,8 +2777,41 @@ def kanban_board_insights(board_id: int, user: dict = Depends(get_current_user))
     if not cards:
         raise HTTPException(status_code=400, detail="No cards on this board yet")
 
-    # Build column distribution
+    # ── Compute delivery metrics from status history ──
+    history = fetch_kanban_board_status_history(board_id)
     col_map = {c["id"]: c["name"] for c in columns}
+    col_positions = {c["id"]: c["position"] for c in columns}
+    first_col_id = min(col_positions, key=col_positions.get) if col_positions else None
+    last_col_id = max(col_positions, key=col_positions.get) if col_positions else None
+
+    # Group history by card_id
+    card_history_map: dict[int, list] = {}
+    for h in history:
+        card_history_map.setdefault(h["card_id"], []).append(h)
+
+    now = datetime.utcnow()
+    card_metrics: dict[int, dict] = {}
+    for card in cards:
+        cid = card["id"]
+        entries = card_history_map.get(cid, [])
+        m = {"aging_days": None, "cycle_time_days": None, "lead_time_days": None}
+        if entries:
+            first_ts = datetime.fromisoformat(entries[0]["changed_at"])
+            last_ts = datetime.fromisoformat(entries[-1]["changed_at"])
+            # Lead time: first entry to last entry (or to now if still active)
+            is_done = card["column_id"] == last_col_id
+            if is_done:
+                m["lead_time_days"] = round((last_ts - first_ts).total_seconds() / 86400, 1)
+            # Cycle time: first move into non-backlog column to done
+            non_backlog = [e for e in entries if e["to_column_id"] != first_col_id]
+            if non_backlog and is_done:
+                cycle_start = datetime.fromisoformat(non_backlog[0]["changed_at"])
+                m["cycle_time_days"] = round((last_ts - cycle_start).total_seconds() / 86400, 1)
+            # Aging: time in current column (for active cards)
+            if not is_done:
+                m["aging_days"] = round((now - last_ts).total_seconds() / 86400, 1)
+        card_metrics[cid] = m
+    # Build column distribution
     col_card_counts = {}
     for c in columns:
         col_card_counts[c["name"]] = 0
@@ -2676,46 +2841,61 @@ def kanban_board_insights(board_id: int, user: dict = Depends(get_current_user))
     cards_detail = ""
     for card in cards:
         col_name = col_map.get(card["column_id"], "Unknown")
+        m = card_metrics.get(card["id"], {})
+        metrics_parts = []
+        if m.get("aging_days") is not None:
+            metrics_parts.append(f"Aging: {m['aging_days']}d")
+        if m.get("cycle_time_days") is not None:
+            metrics_parts.append(f"Cycle Time: {m['cycle_time_days']}d")
+        if m.get("lead_time_days") is not None:
+            metrics_parts.append(f"Lead Time: {m['lead_time_days']}d")
+        metrics_str = " | ".join(metrics_parts) if metrics_parts else "No history yet"
         cards_detail += (
             f"  - \"{card.get('title', '')}\" | Column: {col_name} "
             f"| Status: {card.get('external_status') or 'N/A'} "
             f"| Assignee: {card.get('assignee') or 'Unassigned'} "
             f"| Source: {card.get('ticket_source') or 'internal'}"
-            f"{ ' | Key: ' + card['issue_key'] if card.get('issue_key') else '' }\n"
+            f"{ ' | Key: ' + card['issue_key'] if card.get('issue_key') else '' }"
+            f" | {metrics_str}\n"
         )
 
     col_dist = ", ".join(f"{k}: {v}" for k, v in col_card_counts.items())
     row_names = ", ".join(r["name"] for r in rows) if rows else "(no swimlanes)"
 
     prompt = (
-        "You are an expert Agile Coach and Kanban practitioner. Analyze this Kanban board and provide "
-        "actionable insights based on Kanban best practices (WIP limits, flow efficiency, bottlenecks, "
-        "cycle time awareness, pull vs push, work distribution).\n\n"
+        "Agile coach at Home Credit PH (fintech). Analyze this Kanban board. Be blunt, name cards, cite numbers.\n\n"
+        "THRESHOLDS: Cycle ≤3d ok, >5d blocked. Lead ≤5d ok, >8d problem. Aging >2d in one column = at risk. WIP max 2-3/person.\n\n"
         f"Board: \"{board.get('name', 'Untitled')}\"\n"
         f"Columns: {', '.join(c['name'] for c in columns)}\n"
         f"Swimlanes: {row_names}\n"
-        f"Total Cards: {len(cards)}\n"
-        f"Column Distribution: {col_dist}\n"
-        f"Status Breakdown: {', '.join(f'{k}: {v}' for k, v in status_counts.items())}\n"
-        f"Source Mix: Internal: {source_counts['internal']}, JIRA: {source_counts['jira']}, ADO: {source_counts['ado']}\n"
-        f"Assignee Workload: {', '.join(f'{k}: {v}' for k, v in assignee_counts.items())}\n"
+        f"Cards: {len(cards)} | Distribution: {col_dist}\n"
+        f"Assignees: {', '.join(f'{k}: {v}' for k, v in assignee_counts.items())}\n"
         f"Today: {date.today().isoformat()}\n\n"
-        f"Cards:\n{cards_detail}\n"
-        "Provide analysis in exactly this JSON format (no markdown, no code fences):\n"
+        f"{cards_detail}\n"
+        "Return JSON only (no markdown, no fences):\n"
         '{\n'
         '  "board_health": "green|amber|red",\n'
-        '  "health_summary": "2-3 sentence Kanban board health assessment covering flow, WIP, and bottlenecks",\n'
-        '  "wip_analysis": "1-2 sentence analysis of work-in-progress distribution across columns",\n'
-        '  "bottlenecks": ["bottleneck observation 1", "bottleneck observation 2"],\n'
-        '  "risks": ["risk 1", "risk 2", "risk 3"],\n'
-        '  "recommendations": ["actionable recommendation 1", "actionable recommendation 2", "actionable recommendation 3"],\n'
+        '  "health_summary": "1 sentence, what matters right now",\n'
+        '  "wip_analysis": "1 sentence, who is overloaded",\n'
+        '  "delivery_metrics": {\n'
+        '    "avg_cycle_time_days": number or null,\n'
+        '    "avg_lead_time_days": number or null,\n'
+        '    "cards_aging_over_3d": number,\n'
+        '    "longest_aging_card": "card title (Xd)" or null,\n'
+        '    "summary": "1 sentence, fast or slow vs thresholds"\n'
+        '  },\n'
+        '  "blockers": ["card — why it is stuck"],\n'
+        '  "blocker_risk_cards": ["card — why it will be stuck soon"],\n'
+        '  "bottlenecks": ["which column and why"],\n'
+        '  "risks": ["1 sentence each, max 3"],\n'
+        '  "recommendations": ["short, direct, max 3"],\n'
         '  "agile_score": 1-10\n'
         '}\n'
-        "Keep each item brief (1 sentence). Focus on real Kanban metrics and actionable agile improvements. "
-        "agile_score is 1 (poor) to 10 (excellent) based on Kanban best practices adherence."
+        "Rules: no fluff, no filler, no jargon. Every sentence must reference a card name or a number. "
+        "Skip sections with empty arrays if nothing applies. Max 1 sentence per array item."
     )
 
-    result = _call_llm(prompt)
+    result = _call_llm(prompt, max_tokens=1500)
     result["board_name"] = board.get("name", "")
     result["total_cards"] = len(cards)
     result["column_distribution"] = col_card_counts
