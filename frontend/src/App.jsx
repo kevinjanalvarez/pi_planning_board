@@ -1614,9 +1614,10 @@ export default function App() {
             </div>
           )}
 
-          <h2 style={{ margin: "0 0 4px", fontSize: 22, color: "#111827", fontWeight: 700 }}>
-            TaskWeave
-          </h2>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, margin: "0 0 4px" }}>
+            <img src="/logo.png" alt="TaskWeave" width="48" height="48" style={{ objectFit: "contain" }} />
+            <h2 style={{ margin: 0, fontSize: 22, color: "#111827", fontWeight: 700 }}>TaskWeave</h2>
+          </div>
           <p style={{ margin: "0 0 20px", fontSize: 13, color: "#6b7280" }}>
             {authMode === "login" ? "Sign in to your account" : "Create a new account"}
           </p>
@@ -1851,12 +1852,7 @@ export default function App() {
               onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.75")}
               onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="#1d4ed8">
-                <rect x="3" y="3" width="8" height="8" rx="1.5"/>
-                <rect x="13" y="3" width="8" height="8" rx="1.5"/>
-                <rect x="3" y="13" width="8" height="8" rx="1.5"/>
-                <rect x="13" y="13" width="8" height="8" rx="1.5"/>
-              </svg>
+              <img src="/logo.png" alt="TaskWeave" width="32" height="32" style={{ objectFit: "contain" }} />
               <span style={{ color: "#111827" }}>Task</span>
               <span style={{ color: "#1d4ed8" }}>Weave</span>
             </button>
@@ -2051,17 +2047,17 @@ export default function App() {
                 }
               }}
               style={{
-                display: "flex", alignItems: "center", gap: 4,
-                padding: "5px 12px", fontSize: 12, fontWeight: 600,
-                background: insightsPanel ? "#eff6ff" : "none",
-                color: insightsPanel ? "#1d4ed8" : "#374151",
-                border: insightsPanel ? "1px solid #bfdbfe" : "1px solid #e5e7eb",
-                borderRadius: 6, cursor: "pointer",
+                background: "none", border: "none", padding: 0, cursor: "pointer",
+                display: "flex", alignItems: "center",
+                opacity: insightsPanel ? 0.85 : 1,
+                filter: insightsPanel ? "brightness(1.1)" : "none",
+                transition: "opacity 0.15s",
               }}
               title={insightsPanel ? "Close panel" : "Taskweave Coach"}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.8")}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = insightsPanel ? "0.85" : "1")}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a4 4 0 0 0-4 4c0 2.8 4 7 4 7s4-4.2 4-7a4 4 0 0 0-4-4z"/><circle cx="12" cy="6" r="1.5"/><path d="M5 20h14"/><path d="M5 17h14"/></svg>
-              Taskweave Coach
+              <img src="/coach-banner.png" alt="Taskweave Coach" height="36" style={{ objectFit: "contain", background: "#fff", borderRadius: 20 }} />
             </button>
             <div style={{ position: "relative", display: "inline-block" }}>
               <button
@@ -2864,7 +2860,7 @@ export default function App() {
               padding: "12px 16px", borderBottom: "1px solid #f3f4f6", flexShrink: 0,
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{ fontSize: 16 }}>&#129302;</span>
+                <img src="/coach-robot.png" alt="" width="20" height="20" style={{ objectFit: "contain" }} />
                 <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Taskweave Coach</span>
                 <span style={{ fontSize: 10, color: "#9ca3af", fontWeight: 500, marginLeft: 4 }}>
                   {insightsData?.type === "board" ? "PI Health" : "Milestone Insights"}
@@ -3049,7 +3045,7 @@ export default function App() {
                 );
               })() : (
                 <div style={{ textAlign: "center", padding: "40px 0", color: "#9ca3af", fontSize: 12 }}>
-                  Click <strong>Taskweave Coach</strong> in the toolbar or use 🤖 on a milestone to generate insights.
+                  Click <strong>Taskweave Coach</strong> in the toolbar or use <img src="/coach-robot.png" alt="robot" width="14" height="14" style={{ verticalAlign: "middle", display: "inline" }} /> on a milestone to generate insights.
                 </div>
               )}
             </div>
@@ -3559,7 +3555,7 @@ export default function App() {
                   }}
                   style={{ fontSize: 14 }}
                 >
-                  &#129302;
+                  <img src="/coach-robot.png" alt="Taskweave Coach" width="18" height="18" style={{ objectFit: "contain" }} />
                 </button>
               ) : null}
               {showLinks ? (

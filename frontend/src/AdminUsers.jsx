@@ -303,12 +303,7 @@ export default function AdminUsers({ apiFetch, currentUser, onLogout, onBack, on
               onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.75")}
               onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="#1d4ed8">
-                <rect x="3" y="3" width="8" height="8" rx="1.5"/>
-                <rect x="13" y="3" width="8" height="8" rx="1.5"/>
-                <rect x="3" y="13" width="8" height="8" rx="1.5"/>
-                <rect x="13" y="13" width="8" height="8" rx="1.5"/>
-              </svg>
+              <img src="/logo.png" alt="TaskWeave" width="32" height="32" style={{ objectFit: "contain" }} />
               <span style={{ color: "#111827" }}>Task</span>
               <span style={{ color: "#1d4ed8" }}>Weave</span>
             </button>

@@ -390,12 +390,7 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
               onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.75")}
               onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="#1d4ed8">
-                <rect x="3" y="3" width="8" height="8" rx="1.5"/>
-                <rect x="13" y="3" width="8" height="8" rx="1.5"/>
-                <rect x="3" y="13" width="8" height="8" rx="1.5"/>
-                <rect x="13" y="13" width="8" height="8" rx="1.5"/>
-              </svg>
+              <img src="/logo.png" alt="TaskWeave" width="32" height="32" style={{ objectFit: "contain" }} />
               <span style={{ color: "#111827" }}>Task</span>
               <span style={{ color: "#1d4ed8" }}>Weave</span>
             </button>
@@ -476,16 +471,17 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
             <button
               onClick={() => { if (insightsPanel) { setInsightsPanel(false); } else { fetchInsights(); } }}
               style={{
-                background: insightsPanel ? "#eff6ff" : "none",
-                color: insightsPanel ? "#1d4ed8" : "#374151",
-                border: insightsPanel ? "1px solid #bfdbfe" : "1px solid #e5e7eb",
-                borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700,
-                display: "flex", alignItems: "center", gap: 5,
+                background: "none", border: "none", padding: 0, cursor: "pointer",
+                display: "flex", alignItems: "center",
+                opacity: insightsPanel ? 0.85 : 1,
+                filter: insightsPanel ? "brightness(1.1)" : "none",
+                transition: "opacity 0.15s",
               }}
               title={insightsPanel ? "Close panel" : "Taskweave Coach"}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.8")}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = insightsPanel ? "0.85" : "1")}
             >
-              <span style={{ fontSize: 14 }}>&#129302;</span>
-              Taskweave Coach
+              <img src="/coach-banner.png" alt="Taskweave Coach" height="36" style={{ objectFit: "contain", background: "#fff", borderRadius: 20 }} />
             </button>
             <div style={{ borderLeft: "1px solid #e5e7eb", height: 24, margin: "0 4px" }} />
             {onManageUsers && pendingCount > 0 && (
@@ -834,7 +830,7 @@ export default function KanbanBoard({ board, apiFetch, auth, onLogout, onBack, o
               padding: "12px 16px", borderBottom: "1px solid #f3f4f6", flexShrink: 0,
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{ fontSize: 16 }}>&#129302;</span>
+                <img src="/coach-robot.png" alt="" width="20" height="20" style={{ objectFit: "contain" }} />
                 <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Taskweave Coach</span>
                 <span style={{ fontSize: 10, color: "#9ca3af", fontWeight: 500, marginLeft: 4 }}>Agile Delivery Insights</span>
               </div>
